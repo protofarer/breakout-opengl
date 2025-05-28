@@ -112,6 +112,7 @@ main :: proc() {
 update :: proc(dt: f32) {
     process_input(dt)
     ball_move(dt, game.width)
+    game_do_collisions()
 }
 
 render :: proc(dt: f32) {
@@ -607,4 +608,36 @@ ball_reset :: proc(position: Vec2, velocity: Vec2) {
     ball.position = position
     ball.velocity = velocity
     ball.stuck = true
+}
+
+check_collision :: proc(a: Game_Object, b: Game_Object) -> bool {
+    return a.position.x + a.size.x >= b.position.x &&
+           b.position.x + b.size.x >= a.position.x &&
+           a.position.y + a.size.y >= b.position.y &&
+           b.position.y + b.size.y >= a.position.y
+}
+
+check_ball_box_collision :: proc(ball: Ball_Object, box: Game_Object) -> bool {
+    ball_center := ball.position + ball.radius
+    half_extents := Vec2{box.size.x / 2, box.size.y / 2}
+    box_center := Vec2{box.position.x + half_extents.x, box.position.y + half_extents.y}
+    d := ball_center - box_center
+    clamped: Vec2
+    clamped.x = clamp(d.x, -half_extents.x, half_extents.x)
+    clamped.y = clamp(d.y, -half_extents.y, half_extents.y)
+    closest := box_center + clamped
+    d = closest - ball_center
+    return linalg.length(d) < ball.radius
+}
+
+game_do_collisions :: proc() {
+    for &box in game.levels[game.level].bricks {
+        if !box.destroyed {
+            if check_ball_box_collision(ball, box) {
+                if !box.is_solid {
+                    box.destroyed = true
+                }
+            }
+        }
+    }
 }
