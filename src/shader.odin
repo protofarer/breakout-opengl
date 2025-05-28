@@ -90,30 +90,30 @@ load_shader_object_from_file :: proc(filepath: string, shader_type: u32) -> (sha
     return shader_object, true
 }
 
-set_bool :: proc(program: u32, name: string, value: bool) {
+shader_set_bool :: proc(program: u32, name: string, value: bool) {
 	gl.Uniform1i(gl.GetUniformLocation(program, strings.clone_to_cstring(name)),i32(value))
 }
 
-set_int :: proc(program: u32, name: string, value: i32) {
+shader_set_int :: proc(program: u32, name: string, value: i32) {
 	gl.Uniform1i(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value)
 }
 
-set_float :: proc(program: u32, name: string, value: f32) {
+shader_set_float :: proc(program: u32, name: string, value: f32) {
 	gl.Uniform1f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value)
 }
 
-set_mat4 :: proc(program: u32, name: string, value: ^Mat4) {
+shader_set_mat4 :: proc(program: u32, name: string, value: ^Mat4) {
 	gl.UniformMatrix4fv(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), 1, false, &value[0,0])
 }
 
-set_vec2 :: proc(program: u32, name: string, value: Vec2) {
+shader_set_vec2 :: proc(program: u32, name: string, value: Vec2) {
 	gl.Uniform2f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y)
 }
 
-set_vec3 :: proc(program: u32, name: string, value: Vec3) {
+shader_set_vec3 :: proc(program: u32, name: string, value: Vec3) {
 	gl.Uniform3f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y, value.z)
 }
 
-set_vec4 :: proc(program: u32, name: string, value: Vec4) {
+shader_set_vec4 :: proc(program: u32, name: string, value: Vec4) {
 	gl.Uniform4f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y, value.z, value.w)
 }
