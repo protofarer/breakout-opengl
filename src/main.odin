@@ -73,6 +73,26 @@ Ball_Object :: struct {
     stuck: bool,
 }
 
+Direction :: enum {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+Direction_Vectors := [Direction]Vec2{
+    .Up = {0,1},
+    .Down = {0,-1},
+    .Left = {-1,0},
+    .Right = {1,0},
+}
+
+Collision_Data :: struct {
+    collided: bool,
+    direction: Direction,
+    difference_vector: Vec2,
+}
+
 PLAYER_SIZE :: Vec2{100, 20}
 PLAYER_VELOCITY :: 500
 
@@ -113,6 +133,10 @@ update :: proc(dt: f32) {
     process_input(dt)
     ball_move(dt, game.width)
     game_do_collisions()
+    if ball.position.y >= f32(game.height) {
+        game_reset_level()
+        game_reset_player()
+    }
 }
 
 render :: proc(dt: f32) {
@@ -177,6 +201,7 @@ process_input :: proc(dt: f32) {
     }
 
     player.position.x = clamp(player.position.x, 0, f32(game.width) - player.size.x)
+    ball.position.x = clamp(ball.position.x, (player.size.x / 2) - ball.radius, f32(game.width) - (player.size.x / 2) - ball.radius)
 }
 
  // initialize game state (load all shaders/textures/levels gameplay state)
@@ -617,7 +642,7 @@ check_collision :: proc(a: Game_Object, b: Game_Object) -> bool {
            b.position.y + b.size.y >= a.position.y
 }
 
-check_ball_box_collision :: proc(ball: Ball_Object, box: Game_Object) -> bool {
+check_ball_box_collision :: proc(ball: Ball_Object, box: Game_Object) -> Collision_Data {
     ball_center := ball.position + ball.radius
     half_extents := Vec2{box.size.x / 2, box.size.y / 2}
     box_center := Vec2{box.position.x + half_extents.x, box.position.y + half_extents.y}
@@ -627,17 +652,97 @@ check_ball_box_collision :: proc(ball: Ball_Object, box: Game_Object) -> bool {
     clamped.y = clamp(d.y, -half_extents.y, half_extents.y)
     closest := box_center + clamped
     d = closest - ball_center
-    return linalg.length(d) < ball.radius
+    if linalg.length(d) < ball.radius {
+        return {
+            collided = true,
+            direction = vector_direction(d),
+            difference_vector = d,
+        }
+    } else {
+        return {
+            collided = false,
+            direction = .Up,
+            difference_vector = {},
+        }
+    }
+
 }
 
 game_do_collisions :: proc() {
     for &box in game.levels[game.level].bricks {
         if !box.destroyed {
-            if check_ball_box_collision(ball, box) {
+            collision := check_ball_box_collision(ball, box)
+            if collision.collided {
                 if !box.is_solid {
                     box.destroyed = true
+                    dir := collision.direction
+                    diff_vector := collision.difference_vector
+                    // horz coll
+                    if dir == .Left || dir == .Right {
+                        ball.velocity.x *= -1
+                        penetration := ball.radius - abs(diff_vector.x)
+                        if dir == .Left {
+                            ball.position.x += penetration
+                        } else {
+                            ball.position.x -= penetration
+                        }
+                    // vert coll
+                    } else {
+                        ball.velocity.y *= -1
+                        penetration := ball.radius - abs(diff_vector.y)
+                        if dir == .Up {
+                            ball.position.y -= penetration
+                        } else {
+                            ball.position.y += penetration
+                        }
+
+                    }
                 }
             }
         }
     }
+    collision := check_ball_box_collision(ball, player)
+    if !ball.stuck && collision.collided {
+        center_board := player.position.x + (player.size.x / 2)
+        distance := ball.position.x + ball.radius - center_board
+        pct := distance / (player.size.x / 2)
+        strength :f32= 2
+        speed := linalg.length(ball.velocity)
+        ball.velocity.x = INITIAL_BALL_VELOCITY.x * pct * strength
+        ball.velocity.y = -1 * abs(ball.velocity.y)
+        ball.velocity = linalg.normalize0(ball.velocity) * speed
+
+    }
+}
+
+vector_direction :: proc(target: Vec2) -> Direction {
+    max: f32
+    best_match: Direction
+    for dir in Direction {
+        dot := linalg.dot(linalg.normalize0(target), Direction_Vectors[dir])
+        if dot > max {
+            max = dot
+            best_match = dir
+        }
+    }
+    return best_match
+}
+
+game_reset_level :: proc() {
+    switch game.level {
+    case 0:
+        game_level_load(&game.levels[0], "assets/one.lvl", game.width, game.height/2)
+    case 1:
+        game_level_load(&game.levels[1], "assets/two.lvl", game.width, game.height/2)
+    case 2:
+        game_level_load(&game.levels[2], "assets/three.lvl", game.width, game.height/2)
+    case 3:
+        game_level_load(&game.levels[3], "assets/four.lvl", game.width, game.height/2)
+    }
+}
+
+game_reset_player :: proc() {
+    player.size = PLAYER_SIZE
+    player.position = Vec2{f32(game.width) / 2 - (player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
+    ball_reset(player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, INITIAL_BALL_VELOCITY)
 }
