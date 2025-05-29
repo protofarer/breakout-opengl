@@ -7,9 +7,11 @@ import "core:fmt"
 import "core:log"
 import "core:math"
 import "core:math/linalg"
+import "core:math/rand"
 import "core:strings"
 import "core:strconv"
 import "vendor:glfw"
+import sa "core:container/small_array"
 import gl "vendor:OpenGL"
 import stbi "vendor:stb/image"
 
@@ -93,18 +95,37 @@ Collision_Data :: struct {
     difference_vector: Vec2,
 }
 
+Particle :: struct {
+    position, velocity: Vec2,
+    color: Vec4,
+    life: f32,
+}
+
+Particle_Generator :: struct {
+    particles: sa.Small_Array(MAX_PARTICLES, Particle),
+    shader: Shader,
+    texture: Texture2D,
+    max_particles: int,
+    last_used_particle: int,
+    vao: u32,
+}
+
 PLAYER_SIZE :: Vec2{100, 20}
 PLAYER_VELOCITY :: 500
 
 BALL_RADIUS :: 12.5
 INITIAL_BALL_VELOCITY :: Vec2{100, -350}
 
+MAX_PARTICLES :: 500
+
 game: Game
 g_window: glfw.WindowHandle
 resman: Resource_Manager
-g_renderer: Sprite_Renderer
+renderer: Sprite_Renderer
 player: Game_Object
 ball: Ball_Object
+
+ball_pg: Particle_Generator
 
 main :: proc() {
     init()
@@ -132,6 +153,7 @@ main :: proc() {
 update :: proc(dt: f32) {
     process_input(dt)
     ball_move(dt, game.width)
+    particle_generator_update(&ball_pg, dt, ball, 2, {ball.radius / 2, ball.radius / 2})
     game_do_collisions()
     if ball.position.y >= f32(game.height) {
         game_reset_level()
@@ -147,6 +169,7 @@ render :: proc(dt: f32) {
         draw_sprite(tex_bg, {0,0}, {f32(game.width), f32(game.height)}, 0)
         game_level_draw(&game.levels[game.level])
         game_object_draw(player)
+        particle_generator_draw(ball_pg)
         game_object_draw(ball.game_object)
     }
     glfw.SwapBuffers(g_window)
@@ -246,22 +269,30 @@ init :: proc() {
        // keys: [1024]bool,
     }
 
-    resman = resman_make()
-    resman_load_shader("shaders/sprite_v.glsl", "shaders/sprite_f.glsl", "", "sprite")
+    projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1) // vertex coords == pixel coords
 
+    resman = resman_make()
+
+    resman_load_shader("shaders/sprite_v.glsl", "shaders/sprite_f.glsl", "", "sprite")
     sprite_shader := resman_get_shader("sprite")
     use_program(sprite_shader)
     shader_set_int(sprite_shader, "image", 0)
-    projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1) // vertex coords == pixel coords
     shader_set_mat4(sprite_shader, "projection", &projection)
 
-    g_renderer = sprite_renderer_make(sprite_shader)
+    resman_load_shader("shaders/particle_v.glsl", "shaders/particle_f.glsl", "", "particle")
+    particle_shader := resman_get_shader("particle")
+    use_program(particle_shader)
+    shader_set_int(particle_shader, "sprite", 0)
+    shader_set_mat4(particle_shader, "projection", &projection)
 
-    resman_load_texture("assets/awesomeface.png", true, "face")
+    renderer = sprite_renderer_make(sprite_shader)
+
     resman_load_texture("assets/background.jpg", false, "background")
+    resman_load_texture("assets/awesomeface.png", true, "face")
     resman_load_texture("assets/block.png", false, "block")
     resman_load_texture("assets/block_solid.png", false, "block_solid")
     resman_load_texture("assets/paddle.png", true, "paddle")
+    resman_load_texture("assets/particle.png", true, "particle")
 
     one: Game_Level
     two: Game_Level
@@ -280,6 +311,9 @@ init :: proc() {
     player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
     ball_pos := player_pos + Vec2{f32(PLAYER_SIZE.x) / 2 - BALL_RADIUS, -BALL_RADIUS * 2}
     ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
+
+    particle_tex := resman_get_texture("particle")
+    ball_pg = particle_generator_make(particle_shader, particle_tex)
 }
 
 ball_object_make :: proc(pos: Vec2, radius: f32 = 12.5, velocity: Vec2, sprite: Texture2D) -> Ball_Object {
@@ -411,7 +445,7 @@ load_texture_from_file :: proc(file: string, alpha: bool) -> Texture2D {
 
 // TODO: use global renderer?
 draw_sprite :: proc(tex: Texture2D, position: Vec2, size: Vec2 = {10, 10}, rotate: f32 = 0, color: Vec3 = Vec3{1,1,1}) {
-    use_program(g_renderer.shader)
+    use_program(renderer.shader)
     // NB: odin stores matrices in column-major order AND uses standard math multiplication. The tutorial uses glm which is also column-major BUT uses row-major multiplication syntax. In odin, the transformations (operations) must be in reverse math order Scale -> Rotate -> Translate.
     model := linalg.matrix4_scale(Vec3{size.x, size.y, 1})
     model = linalg.matrix4_translate(Vec3{-0.5 * size.x, -0.5 * size.y, 0}) * model
@@ -420,13 +454,13 @@ draw_sprite :: proc(tex: Texture2D, position: Vec2, size: Vec2 = {10, 10}, rotat
     model = linalg.matrix4_translate(Vec3{position.x, position.y, 0}) * model
 
 
-    shader_set_mat4(g_renderer.shader, "model", &model)
-    shader_set_vec3(g_renderer.shader, "spriteColor", color)
+    shader_set_mat4(renderer.shader, "model", &model)
+    shader_set_vec3(renderer.shader, "spriteColor", color)
 
     gl.ActiveTexture(gl.TEXTURE0)
     texture_bind(tex)
 
-    gl.BindVertexArray(g_renderer.quad_vao)
+    gl.BindVertexArray(renderer.quad_vao)
     gl.DrawArrays(gl.TRIANGLES, 0, 6)
     gl.BindVertexArray(0)
 }
@@ -459,7 +493,7 @@ init_render_data :: proc(sprite_renderer: ^Sprite_Renderer) {
 }
 
 sprite_renderer_destroy :: proc() {
-    gl.DeleteVertexArrays(1, &g_renderer.quad_vao)
+    gl.DeleteVertexArrays(1, &renderer.quad_vao)
 }
 
 game_object_make :: proc(pos: Vec2 = {0,0}, size: Vec2 = {1,1}, sprite: Texture2D, color: Vec3 = {1,1,1}, velocity: Vec2 = {0,0}) -> Game_Object {
@@ -745,4 +779,112 @@ game_reset_player :: proc() {
     player.size = PLAYER_SIZE
     player.position = Vec2{f32(game.width) / 2 - (player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
     ball_reset(player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, INITIAL_BALL_VELOCITY)
+}
+
+particle_generator_make :: proc(shader: Shader, texture: Texture2D) -> Particle_Generator {
+     // set up mesh and attribute properties
+    vbo: u32
+    vao: u32
+    particle_quad := [?]f32 {
+        0.0, 1.0, 0.0, 1.0,
+        1.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+
+        0.0, 1.0, 0.0, 1.0,
+        1.0, 1.0, 1.0, 1.0,
+        1.0, 0.0, 1.0, 0.0
+    }
+    gl.GenVertexArrays(1, &vao)
+    gl.GenBuffers(1, &vbo)
+    gl.BindVertexArray(vao)
+    // fill mesh buffer
+    gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.BufferData(gl.ARRAY_BUFFER, size_of(particle_quad), &particle_quad, gl.STATIC_DRAW)
+    // set mesh attributes
+    gl.EnableVertexAttribArray(0)
+    gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * size_of(f32), uintptr(0))
+    gl.BindVertexArray(0)
+
+    // create this->amount default particle instances
+    particles: sa.Small_Array(MAX_PARTICLES, Particle)
+    particle := particle_make()
+    for i in 0..<MAX_PARTICLES {
+        sa.push(&particles, particle)
+    }
+    return Particle_Generator {
+        particles = particles,
+        shader = shader,
+        texture = texture,
+        max_particles = MAX_PARTICLES,
+        vao = vao,
+    }
+}
+
+particle_generator_update :: proc(pg: ^Particle_Generator, dt: f32, object: Game_Object, n_new_particles: int, offset: Vec2 = {0,0}) {
+    // continuously generate particles
+    n_new_particles := 2
+    for i in 0..<n_new_particles {
+        unused_particle := particle_generator_first_unused_particle(pg)
+        particle_generator_respawn_particle(pg, sa.get_ptr(&pg.particles, unused_particle), object, offset)
+    }
+
+    // update particles
+    for &p in sa.slice(&pg.particles) {
+        p.life -= dt
+        if p.life > 0 {
+            p.position -= p.velocity * dt
+            p.color.a -= dt * 2.5
+        }
+    }
+}
+
+particle_generator_first_unused_particle :: proc(pg: ^Particle_Generator) -> int {
+    for i in pg.last_used_particle..<sa.len(pg.particles) {
+        if sa.get(pg.particles, i).life <= 0 {
+            pg.last_used_particle = i
+            return i
+        }
+    }
+    for i in 0..<pg.last_used_particle {
+        if sa.get(pg.particles, i).life <= 0 {
+            pg.last_used_particle = i
+            return i
+        }
+    }
+    pg.last_used_particle = 0
+    return 0
+}
+
+particle_generator_respawn_particle :: proc(pg: ^Particle_Generator, particle: ^Particle, object: Game_Object, offset: Vec2 = {0,0}) {
+    rgn := rand.float32_range(-5, 5)
+    particle.position = object.position + rgn + offset
+
+    random_color := rand.float32_range(0.5, 1.0)
+    particle.color = {random_color, random_color, random_color, 1.0}
+
+    particle.life = 1
+    particle.velocity = object.velocity * 0.1
+}
+
+particle_generator_draw :: proc(pg: Particle_Generator) {
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
+    use_program(pg.shader)
+    for i in 0..<sa.len(pg.particles) {
+        p := sa.get(pg.particles, i)
+        if p.life > 0 {
+            shader_set_vec2(pg.shader, "offset", p.position)
+            shader_set_vec4(pg.shader, "color", p.color)
+            texture_bind(pg.texture)
+            gl.BindVertexArray(pg.vao)
+            gl.DrawArrays(gl.TRIANGLES,0,6)
+            gl.BindVertexArray(0)
+        }
+    }
+    gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+}
+
+particle_make :: proc() -> Particle {
+    return {
+        color = {1,1,1,1}
+    }
 }
