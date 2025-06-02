@@ -10,11 +10,12 @@ import "core:math/linalg"
 import "core:math/rand"
 import "core:strings"
 import "core:strconv"
+import sa "core:container/small_array"
 import "vendor:glfw"
 import ma "vendor:miniaudio"
-import sa "core:container/small_array"
 import gl "vendor:OpenGL"
 import stbi "vendor:stb/image"
+import stbtt "vendor:stb/truetype"
 
 pr :: fmt.println
 
@@ -25,6 +26,7 @@ GL_MAJOR_VERSION :: 3
 GL_MINOR_VERSION :: 3
 
 Vec2 :: [2]f32
+Vec2i :: [2]i32
 Vec3 :: [3]f32
 Vec4 :: [4]f32
 Mat4 :: matrix[4,4]f32
@@ -32,11 +34,13 @@ Mat4 :: matrix[4,4]f32
 Game :: struct {
     state: Game_State,
     keys: [1024]bool,
+    keys_processed: [1024]bool,
     width: u32,
     height: u32,
     levels: [dynamic]Game_Level,
     level: u32,
     powerups: [dynamic]Powerup_Object,
+    lives: i32,
 }
 
 Game_State :: enum {
@@ -132,6 +136,7 @@ ball: Ball_Object
 ball_pg: Particle_Generator
 effects: Post_Processor
 g_shake_time: f32
+text_renderer: Text_Renderer
 
 main :: proc() {
     init()
@@ -170,13 +175,23 @@ update :: proc(dt: f32) {
         }
     }
     if ball.position.y >= f32(game.height) {
+        game.lives -= 1
+        if game.lives == 0 {
+            game_reset_level()
+            game.state = .Menu
+        }
+        game_reset_player()
+    }
+    if game.state == .Active && game_is_completed(game.levels[game.level]) {
         game_reset_level()
         game_reset_player()
+        effects.chaos = true
+        game.state = .Win
     }
 }
 
 render :: proc(dt: f32) {
-    if game.state == .Active {
+    if game.state == .Active || game.state == .Menu {
         effects_begin_render(effects)
 
             draw_sprite(resman_get_texture("background"), {0,0}, {f32(game.width), f32(game.height)}, 0)
@@ -192,6 +207,19 @@ render :: proc(dt: f32) {
 
         effects_end_render(effects)
         effects_render(effects, f32(glfw.GetTime()))
+
+        // text_renderer_render_text(&text_renderer, "Hello, World!", 5.0, 5.0, 1.0)
+        lives := fmt.tprintf("Lives:%v", game.lives)
+        text_renderer_render_text(&text_renderer, lives, 5.0, 5.0, 1.0)
+    }
+    if game.state == .Menu {
+        text_renderer_render_text(&text_renderer, "Press ENTER to start", 250, WINDOW_H / 2, 1)
+        text_renderer_render_text(&text_renderer, "Press W or S to select level", 245, WINDOW_H / 2 + 20, 0.75)
+    }
+    if game.state == .Win {
+        text_renderer_render_text(&text_renderer, "You WON!!!", 320, WINDOW_H / 2 + 20, 1.2, {0,1,0})
+        text_renderer_render_text(&text_renderer, "Press ENTER to retry or ESC to quit", 200, WINDOW_H / 2+ 60, 1.2, {1,1,0})
+
     }
     glfw.SwapBuffers(window)
 }
@@ -206,6 +234,7 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
             game.keys[key] = true
         } else if action == glfw.RELEASE {
             game.keys[key] = false
+            game.keys_processed[key] = false
         }
     }
 }
@@ -220,31 +249,65 @@ error_callback :: proc "c" (code: i32, desc: cstring) {
 }
 
 process_input :: proc(dt: f32) {
-    if game.state != .Active {
-        return
-    }
-    dx := PLAYER_VELOCITY * dt
-    if game.keys[glfw.KEY_A] {
-        if player.position.x >= 0 {
-            player.position.x -= dx
-            if ball.stuck {
-                ball.position.x -= dx
+    if game.state == .Menu {
+        if game.keys[glfw.KEY_ENTER] && !game.keys_processed[glfw.KEY_ENTER]{
+            game.state = .Active
+            game.keys_processed[glfw.KEY_ENTER] = true
+        }
+        if game.keys[glfw.KEY_W] && !game.keys_processed[glfw.KEY_W] {
+            game.level = (game.level + 1) % 4
+            game.keys_processed[glfw.KEY_W] = true
+        }
+        if game.keys[glfw.KEY_S] && !game.keys_processed[glfw.KEY_S] {
+            game.keys_processed[glfw.KEY_S] = true
+            if game.level > 0 {
+                game.level -= 1
+            } else {
+                game.level = 3
             }
         }
-    }
-    if game.keys[glfw.KEY_D] {
-        if player.position.x <= f32(game.width) - player.size.x {
-            player.position.x += dx
-            if ball.stuck {
-                ball.position.x += dx
-            }
-        }
-    }
-    if game.keys[glfw.KEY_SPACE] {
-        ball.stuck = false
     }
 
-    player.position.x = clamp(player.position.x, 0, f32(game.width) - player.size.x)
+    if game.state == .Active {
+        dx := PLAYER_VELOCITY * dt
+        if game.keys[glfw.KEY_A] {
+            if player.position.x >= 0 {
+                player.position.x -= dx
+                if ball.stuck {
+                    ball.position.x -= dx
+                }
+            }
+        }
+        if game.keys[glfw.KEY_D] {
+            if player.position.x <= f32(game.width) - player.size.x {
+                player.position.x += dx
+                if ball.stuck {
+                    ball.position.x += dx
+                }
+            }
+        }
+        if game.keys[glfw.KEY_SPACE] {
+            ball.stuck = false
+        }
+
+        if game.keys[glfw.KEY_R] {
+            // win state
+            game_reset_level()
+            game_reset_player()
+            effects.chaos = true
+            game.state = .Win
+        }
+
+        player.position.x = clamp(player.position.x, 0, f32(game.width) - player.size.x)
+    }
+
+    if game.state == .Win {
+        if game.keys[glfw.KEY_ENTER] {
+            game.keys_processed[glfw.KEY_ENTER] = true // NOTE: is this needed?
+            effects.chaos = false
+            game.state = .Menu
+        }
+    }
 }
 
  // initialize game state (load all shaders/textures/levels gameplay state)
@@ -283,9 +346,10 @@ init :: proc() {
     window = local_window
 
     game = Game{
-       state = .Active,
+       state = .Menu,
        width = WINDOW_W,
        height = WINDOW_H,
+       lives = 3,
     }
 
     projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1) // vertex coords == pixel coords
@@ -324,6 +388,12 @@ init :: proc() {
     resman_load_texture("assets/powerup_speed.png", true, "speed")
     resman_load_texture("assets/powerup_sticky.png", true, "sticky")
 
+
+    result := ma.engine_init(nil, &audio_engine)
+    if result != ma.result.SUCCESS {
+        log.error("Failed to initialize audio engine")
+    }
+
     resman_load_sound("assets/music.mp3", "music")
     resman_load_sound("assets/bleep.mp3", "hit-nonsolid")
     resman_load_sound("assets/solid.wav", "hit-solid")
@@ -333,10 +403,8 @@ init :: proc() {
     particle_tex := resman_get_texture("particle")
     ball_pg = particle_generator_make(particle_shader, particle_tex)
 
-    result := ma.engine_init(nil, &audio_engine)
-    if result != ma.result.SUCCESS {
-        log.error("Failed to initialize audio engine")
-    }
+    text_renderer_make(&text_renderer, WINDOW_W, WINDOW_H)
+    text_renderer_load(&text_renderer, "assets/arial.ttf", 24)
 
     one: Game_Level
     two: Game_Level
@@ -355,8 +423,8 @@ init :: proc() {
     player_pos := Vec2{ (f32(game.width) / 2) - (PLAYER_SIZE.x / 2), f32(game.height) - PLAYER_SIZE.y}
     player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
     ball_pos := player_pos + Vec2{f32(PLAYER_SIZE.x) / 2 - BALL_RADIUS, -BALL_RADIUS * 2}
-    // ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
-    ball = ball_object_make(ball_pos, BALL_RADIUS, {0, -450}, resman_get_texture("face"))
+    ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
+    // ball = ball_object_make(ball_pos, BALL_RADIUS, {0, -450}, resman_get_texture("face"))
 
     play_sound("music")
 }
@@ -879,6 +947,7 @@ game_reset_level :: proc() {
         game_level_load(&game.levels[3], "assets/four.lvl", game.width, game.height/2)
     }
     clear(&game.powerups)
+    game.lives = 3
 }
 
 game_reset_player :: proc() {
@@ -1282,4 +1351,255 @@ is_other_powerup_active :: proc(type: Powerup_Type) -> bool {
         }
     }
     return false
+}
+
+Character :: struct {
+    texture_id: u32,
+    size: Vec2i,
+    bearing: Vec2i,
+    advance: u32,
+}
+
+Text_Renderer :: struct {
+    characters: map[rune]Character,
+    text_shader: Shader,
+    vao, vbo: u32,
+    // font_info: stbtt.fontinfo,
+    // font_scale: f32,
+}
+
+text_renderer_make :: proc(renderer: ^Text_Renderer, width, height: u32) {
+    text_shader := resman_load_shader("shaders/text_v.glsl", "shaders/text_f.glsl", "", "text")
+    // WARN: unsure znear/far vals
+    text_projection := linalg.matrix_ortho3d_f32(0, f32(WINDOW_W), f32(WINDOW_H), 0, -1, 1)
+    // projection := linalg.matrix_ortho3d_f32(0, f32(width), f32(height), 0, 0, 0)
+    shader_use(text_shader)
+    shader_set_mat4(text_shader, "projection", &text_projection)
+    shader_set_int(text_shader, "text", 0)
+
+    renderer.text_shader = text_shader
+
+    vao, vbo: u32
+    gl.GenVertexArrays(1, &vao)
+    gl.GenBuffers(1, &vbo)
+    gl.BindVertexArray(vao)
+    gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.BufferData(gl.ARRAY_BUFFER, size_of(f32) * 6 * 4, nil, gl.DYNAMIC_DRAW)
+    gl.EnableVertexAttribArray(0)
+    gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * size_of(f32), 0)
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+    gl.BindVertexArray(0)
+
+    renderer.vao = vao
+    renderer.vbo = vbo
+    renderer.characters = make(map[rune]Character)
+}
+
+// pre-compile a list of chars from given font
+text_renderer_load :: proc(renderer: ^Text_Renderer, font: string, font_size: i32) {
+    clear(&renderer.characters)
+
+    // init, load freetype lib
+
+    font_data, ok := os.read_entire_file(font)
+    if !ok {
+        log.error("Failed to load font file")
+        return
+    }
+    defer delete(font_data)
+
+    // Initialize font
+    font_info: stbtt.fontinfo
+    if !stbtt.InitFont(&font_info, raw_data(font_data), 0) {
+        log.error("Failed to init font")
+        return
+    }
+
+    // Calc scale for desired pixel height
+    scale := stbtt.ScaleForPixelHeight(&font_info, f32(font_size))
+
+    ascent, descent, line_gap: i32
+    stbtt.GetFontVMetrics(&font_info, &ascent, &descent, &line_gap)
+
+    scaled_ascent := i32(f32(ascent) * scale)
+
+    // Disable byte-alignment restriction
+    gl.PixelStorei(gl.UNPACK_ALIGNMENT, 1)
+
+    // Gen textures for ASCII chars (0-127)
+    for c: rune = 0; c < 128; c += 1 {
+        glyph_index := stbtt.FindGlyphIndex(&font_info, c)
+        if glyph_index == 0 && c != ' ' {
+            continue
+        }
+
+        // Get glyph bitmap
+        width, height, xoff, yoff: i32
+        bitmap := stbtt.GetCodepointBitmap(
+            &font_info,
+            scale, scale,
+            c,
+            &width, &height, &xoff, &yoff,
+        )
+
+        if bitmap == nil {
+            if c == ' ' {
+                // Get advance for space
+                advance_width, left_side_bearing: i32
+                stbtt.GetCodepointHMetrics(&font_info, c, &advance_width, &left_side_bearing)
+                
+                // Create 1x1 empty texture for space
+                texture_id: u32
+                gl.GenTextures(1, &texture_id)
+                gl.BindTexture(gl.TEXTURE_2D, texture_id)
+                
+                empty_pixel: u8 = 0
+                gl.TexImage2D(
+                    gl.TEXTURE_2D, 0, gl.RED,
+                    1, 1, 0,
+                    gl.RED, gl.UNSIGNED_BYTE,
+                    &empty_pixel
+                )
+                
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                
+                character := Character{
+                    texture_id = texture_id,
+                    size = {0, 0},
+                    bearing = {0, 0},
+                    advance = u32(f32(advance_width) * scale),
+                }
+                renderer.characters[c] = character
+            }
+            continue
+        }
+        defer stbtt.FreeBitmap(bitmap, nil)
+
+        // Gen OpenGL texture
+        texture_id: u32
+        gl.GenTextures(1, &texture_id)
+        gl.BindTexture(gl.TEXTURE_2D, texture_id)
+
+        if bitmap != nil {
+            gl.TexImage2D(
+                gl.TEXTURE_2D, 0, gl.RED,
+                width, height, 0,
+                gl.RED, gl.UNSIGNED_BYTE,
+                bitmap,
+            )
+        } 
+
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+
+        // Get horizontal metrics
+        advance_width, left_side_bearing: i32
+        stbtt.GetCodepointHMetrics(&font_info, c, &advance_width, &left_side_bearing)
+
+        x0, y0, x1, y1: i32
+        stbtt.GetCodepointBitmapBox(&font_info, c, scale, scale, &x0, &y0, &x1, &y1)
+
+        // Need to calc bitmap_top equivalent (because ref code uses FreeType)
+        // In FreeType, bitmap_top is dist from baseline to top of glyph
+        // In stb_truetype, yoff is negative and represents top of bbox
+        // y0 is the top of the bitmap relative to the baseline (negative for glyphs above baseline)
+        bitmap_top := -y0
+
+        character := Character{
+            texture_id = texture_id,
+            size = {width, height},
+            // bearing = {xoff, yoff},
+            bearing = {xoff, bitmap_top},
+            advance = u32(f32(advance_width) * scale),
+        }
+        renderer.characters[c] = character
+    }
+
+    gl.BindTexture(gl.TEXTURE_2D, 0)
+}
+
+// renders a string of text using the precompiled list of chars
+text_renderer_render_text :: proc(renderer: ^Text_Renderer, text: string, x, y, scale: f32, color: [3]f32 = {1.0, 1.0, 1.0}) {
+    // Activate shader and set uniforms
+    shader_use(renderer.text_shader)
+    shader_set_vec3(renderer.text_shader, "textColor", color)
+    gl.ActiveTexture(gl.TEXTURE0)
+    gl.BindVertexArray(renderer.vao)
+
+    h_char, _ := renderer.characters['H']
+    cursor_x := x
+
+    // Iterate through each character in the text
+    for c in text {
+        ch, exists := renderer.characters[c]
+        if !exists {
+            continue // Skip unsupported characters
+        }
+
+        // Calculate position
+        // WARN: this differs
+        // xpos := cursor_x + f32(character.bearing.x) * scale
+        // ypos := y - f32(character.size.y - character.bearing.y) * scale
+        xpos := cursor_x + f32(ch.bearing.x) * scale
+        ypos := y + f32(h_char.bearing.y - ch.bearing.y) * scale
+        
+        w := f32(ch.size.x) * scale
+        h := f32(ch.size.y) * scale
+        
+        // Update VBO for this character
+        vertices := [6][4]f32{
+            {xpos,     ypos + h, 0.0, 1.0}, // Bottom-left
+            {xpos + w, ypos,     1.0, 0.0}, // Top-right
+            {xpos,     ypos,     0.0, 0.0}, // Top-left
+            
+            {xpos,     ypos + h, 0.0, 1.0}, // Bottom-left
+            {xpos + w, ypos + h, 1.0, 1.0}, // Bottom-right
+            {xpos + w, ypos,     1.0, 0.0}, // Top-right
+        }
+        
+        // Bind character texture
+        gl.BindTexture(gl.TEXTURE_2D, ch.texture_id)
+        
+        // Update VBO content
+        gl.BindBuffer(gl.ARRAY_BUFFER, renderer.vbo)
+        gl.BufferSubData(gl.ARRAY_BUFFER, 0, size_of(vertices), &vertices[0][0])
+        gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+        
+        // Render quad
+        gl.DrawArrays(gl.TRIANGLES, 0, 6)
+        
+        // Advance cursor for next character (matching C++ bit shift logic)
+        // C++: x += (ch.Advance >> 6) * scale; 
+        // Note: stb_truetype doesn't use 26.6 fixed point, so no bit shift needed
+        cursor_x += f32(ch.advance) * scale
+    }
+    
+    gl.BindVertexArray(0)
+    gl.BindTexture(gl.TEXTURE_2D, 0)
+}
+
+text_renderer_cleanup :: proc(renderer: ^Text_Renderer) {
+    // Delete character textures
+    for char, &character in renderer.characters {
+        gl.DeleteTextures(1, &character.texture_id)
+    }
+    delete(renderer.characters)
+
+    // Delete OpenGL objects
+    gl.DeleteVertexArrays(1, &renderer.vao)
+    gl.DeleteBuffers(1, &renderer.vbo)
+}
+
+game_is_completed :: proc(level: Game_Level) -> bool {
+    for tile in level.bricks {
+        if !tile.is_solid && !tile.destroyed {
+            return false
+        }
+    }
+    return true
 }
