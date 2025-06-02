@@ -799,7 +799,7 @@ read_file_to_string :: proc(path: string) -> string {
 	return string(data)
 }
 
-ball_move :: proc(dt: f32, window_width: u32) -> Vec2 {
+ball_move :: proc(dt: f32, window_width: u32) {
     if !game.ball.stuck {
         game.ball.position += game.ball.velocity * dt
         if game.ball.position.x < 0 {
@@ -814,8 +814,6 @@ ball_move :: proc(dt: f32, window_width: u32) -> Vec2 {
             game.ball.position.y = 0
         }
     }
-    // ball.position.x = clamp(ball.position.x, 0, f32(game.width) - (player.size.x / 2) - ball.radius)
-    return game.ball.position
 }
 
 ball_reset :: proc(position: Vec2, velocity: Vec2) {
@@ -876,7 +874,6 @@ game_do_collisions :: proc() {
                 if !(game.ball.passthrough && !box.is_solid) {
                     dir := collision.direction
                     diff_vector := collision.difference_vector
-                    // horz coll
                     if dir == .Left || dir == .Right {
                         game.ball.velocity.x *= -1
                         penetration := game.ball.radius - abs(diff_vector.x)
@@ -885,7 +882,6 @@ game_do_collisions :: proc() {
                         } else {
                             game.ball.position.x -= penetration
                         }
-                        // vert coll
                     } else {
                         game.ball.velocity.y *= -1
                         penetration := game.ball.radius - abs(diff_vector.y)
@@ -967,7 +963,6 @@ game_reset_player :: proc() {
 }
 
 particle_generator_init :: proc(pg: ^Particle_Generator, shader: Shader, texture: Texture2D) {
-     // set up mesh and attribute properties
     vbo: u32
     vao: u32
     particle_quad := [?]f32 {
@@ -981,16 +976,15 @@ particle_generator_init :: proc(pg: ^Particle_Generator, shader: Shader, texture
     }
     gl.GenVertexArrays(1, &vao)
     gl.GenBuffers(1, &vbo)
+
     gl.BindVertexArray(vao)
-    // fill mesh buffer
     gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+
     gl.BufferData(gl.ARRAY_BUFFER, size_of(particle_quad), &particle_quad, gl.STATIC_DRAW)
-    // set mesh attributes
     gl.EnableVertexAttribArray(0)
     gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * size_of(f32), uintptr(0))
     gl.BindVertexArray(0)
 
-    // create this->amount default particle instances
     particles: sa.Small_Array(MAX_PARTICLES, Particle)
     particle := particle_make()
     for i in 0..<MAX_PARTICLES {
@@ -1013,7 +1007,6 @@ particle_generator_update :: proc(pg: ^Particle_Generator, dt: f32, object: Game
         particle_generator_respawn_particle(pg, sa.get_ptr(&pg.particles, unused_particle), object, offset)
     }
 
-    // update particles
     for &p in sa.slice(&pg.particles) {
         p.life -= dt
         if p.life > 0 {
@@ -1084,7 +1077,6 @@ Post_Processor :: struct {
 }
 
 post_processor_init :: proc(effects: ^Post_Processor, shader: Shader, width: u32, height: u32) {
-    // init renderbuffer & framebuffer objects
     msfbo, fbo, rbo: u32
     gl.GenFramebuffers(1, &msfbo)
     gl.GenFramebuffers(1, &fbo)
@@ -1112,8 +1104,8 @@ post_processor_init :: proc(effects: ^Post_Processor, shader: Shader, width: u32
     // init render data and uniforms
     vao := post_processor_init_render_data()
     shader_use(shader)
-    shader_set_int(shader, "scene", 0) // , true) // what's with the true?..shader class has new param for its set functions: `useShader: bool`  which calls `shader_use` before setting the value
-    offset: f32 = 1./300
+    shader_set_int(shader, "scene", 0) // , true) // consider shader set unfiform procs new param: `useShader: bool`  which calls `shader_use` before setting the value
+    offset: f32 = 1.0 / 300
     offsets := [9][2]f32 {
         { -offset,  offset  },
         { 0,        offset  },
@@ -1156,7 +1148,7 @@ post_processor_init_render_data :: proc() -> u32 {
     gl.GenBuffers(1, &vbo)
     gl.GenVertexArrays(1, &vao)
     vertices := [?]f32 {
-         // pos        // tex
+        // pos      // tex
         -1.0, -1.0, 0.0, 0.0,
          1.0,  1.0, 1.0, 1.0,
         -1.0,  1.0, 0.0, 1.0,
@@ -1241,7 +1233,7 @@ powerup_make :: proc(type: Powerup_Type, color: Vec3, duration: f32, position: V
         is_solid = o.is_solid,
         destroyed = o.destroyed,
         sprite = o.sprite,
-        // Powerup specific
+
         type = type,
         duration = duration,
         activated = false,
@@ -1369,13 +1361,10 @@ Text_Renderer :: struct {
     characters: map[rune]Character,
     text_shader: Shader,
     vao, vbo: u32,
-    // font_info: stbtt.fontinfo,
-    // font_scale: f32,
 }
 
 text_renderer_init :: proc(renderer: ^Text_Renderer, width, height: u32) {
     text_shader := resman_load_shader("shaders/text_v.glsl", "shaders/text_f.glsl", "", "text")
-    // WARN: unsure znear/far vals
     text_projection := linalg.matrix_ortho3d_f32(0, f32(width), f32(height), 0, -1, 1)
     shader_use(text_shader)
     shader_set_mat4(text_shader, "projection", &text_projection)
@@ -1402,8 +1391,6 @@ text_renderer_init :: proc(renderer: ^Text_Renderer, width, height: u32) {
 // pre-compile a list of chars from given font
 text_renderer_load :: proc(renderer: ^Text_Renderer, font: string, font_size: i32) {
     clear(&renderer.characters)
-
-    // init, load freetype lib
 
     font_data, ok := os.read_entire_file(font)
     if !ok {
@@ -1527,9 +1514,7 @@ text_renderer_load :: proc(renderer: ^Text_Renderer, font: string, font_size: i3
     gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 
-// renders a string of text using the precompiled list of chars
 text_renderer_render_text :: proc(renderer: ^Text_Renderer, text: string, x, y, scale: f32, color: [3]f32 = {1.0, 1.0, 1.0}) {
-    // Activate shader and set uniforms
     shader_use(renderer.text_shader)
     shader_set_vec3(renderer.text_shader, "textColor", color)
     gl.ActiveTexture(gl.TEXTURE0)
@@ -1538,7 +1523,6 @@ text_renderer_render_text :: proc(renderer: ^Text_Renderer, text: string, x, y, 
     h_char, _ := renderer.characters['H']
     cursor_x := x
 
-    // Iterate through each character in the text
     for c in text {
         ch, exists := renderer.characters[c]
         if !exists {
@@ -1546,55 +1530,46 @@ text_renderer_render_text :: proc(renderer: ^Text_Renderer, text: string, x, y, 
         }
 
         // Calculate position
-        // WARN: this differs
+        // WARN: this differs from reference code that uses FreeType
         // xpos := cursor_x + f32(character.bearing.x) * scale
         // ypos := y - f32(character.size.y - character.bearing.y) * scale
         xpos := cursor_x + f32(ch.bearing.x) * scale
         ypos := y + f32(h_char.bearing.y - ch.bearing.y) * scale
-        
+
         w := f32(ch.size.x) * scale
         h := f32(ch.size.y) * scale
-        
-        // Update VBO for this character
+
         vertices := [6][4]f32{
             {xpos,     ypos + h, 0.0, 1.0}, // Bottom-left
             {xpos + w, ypos,     1.0, 0.0}, // Top-right
             {xpos,     ypos,     0.0, 0.0}, // Top-left
-            
+
             {xpos,     ypos + h, 0.0, 1.0}, // Bottom-left
             {xpos + w, ypos + h, 1.0, 1.0}, // Bottom-right
             {xpos + w, ypos,     1.0, 0.0}, // Top-right
         }
-        
-        // Bind character texture
         gl.BindTexture(gl.TEXTURE_2D, ch.texture_id)
-        
-        // Update VBO content
+
         gl.BindBuffer(gl.ARRAY_BUFFER, renderer.vbo)
         gl.BufferSubData(gl.ARRAY_BUFFER, 0, size_of(vertices), &vertices[0][0])
         gl.BindBuffer(gl.ARRAY_BUFFER, 0)
-        
-        // Render quad
         gl.DrawArrays(gl.TRIANGLES, 0, 6)
-        
+
         // Advance cursor for next character (matching C++ bit shift logic)
         // C++: x += (ch.Advance >> 6) * scale; 
         // Note: stb_truetype doesn't use 26.6 fixed point, so no bit shift needed
         cursor_x += f32(ch.advance) * scale
     }
-    
     gl.BindVertexArray(0)
     gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 
 text_renderer_cleanup :: proc(renderer: ^Text_Renderer) {
-    // Delete character textures
     for char, &character in renderer.characters {
         gl.DeleteTextures(1, &character.texture_id)
     }
     delete(renderer.characters)
 
-    // Delete OpenGL objects
     gl.DeleteVertexArrays(1, &renderer.vao)
     gl.DeleteBuffers(1, &renderer.vbo)
 }
@@ -1643,6 +1618,5 @@ update_viewport_and_projection :: proc(screen_width: u32, screen_height: u32) {
     shader_use(text_shader)
     shader_set_mat4(text_shader, "projection", &projection)
 
-    // Set OpenGL viewport with letterboxing
     gl.Viewport(game.viewport_x, game.viewport_y, game.viewport_width, game.viewport_height)
 }
