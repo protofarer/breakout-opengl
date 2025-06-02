@@ -124,13 +124,13 @@ INITIAL_BALL_VELOCITY :: Vec2{100, -350}
 MAX_PARTICLES :: 500
 
 game: Game
-g_window: glfw.WindowHandle
+window: glfw.WindowHandle
 resman: Resource_Manager
 renderer: Sprite_Renderer
 player: Game_Object
 ball: Ball_Object
 ball_pg: Particle_Generator
-post_processor: Post_Processor
+effects: Post_Processor
 g_shake_time: f32
 
 main :: proc() {
@@ -138,7 +138,7 @@ main :: proc() {
 
     last_frame: f32
 
-	for !glfw.WindowShouldClose(g_window) {
+	for !glfw.WindowShouldClose(window) {
         current_frame := f32(glfw.GetTime())
         dt := current_frame - last_frame
         last_frame = current_frame
@@ -153,7 +153,7 @@ main :: proc() {
 
     resman_clear()
 	glfw.Terminate()
-	glfw.DestroyWindow(g_window)
+	glfw.DestroyWindow(window)
 }
 
 update :: proc(dt: f32) {
@@ -166,7 +166,7 @@ update :: proc(dt: f32) {
     if g_shake_time > 0 {
         g_shake_time -= dt
         if g_shake_time <= 0 {
-            post_processor.shake = false
+            effects.shake = false
         }
     }
     if ball.position.y >= f32(game.height) {
@@ -177,7 +177,7 @@ update :: proc(dt: f32) {
 
 render :: proc(dt: f32) {
     if game.state == .Active {
-        post_processor_begin_render(post_processor)
+        effects_begin_render(effects)
 
             draw_sprite(resman_get_texture("background"), {0,0}, {f32(game.width), f32(game.height)}, 0)
             game_level_draw(&game.levels[game.level])
@@ -190,10 +190,10 @@ render :: proc(dt: f32) {
             particle_generator_draw(ball_pg)
             game_object_draw(ball.game_object)
 
-        post_processor_end_render(post_processor)
-        post_processor_render(post_processor, f32(glfw.GetTime()))
+        effects_end_render(effects)
+        effects_render(effects, f32(glfw.GetTime()))
     }
-    glfw.SwapBuffers(g_window)
+    glfw.SwapBuffers(window)
 }
 
 key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods: i32) {
@@ -264,15 +264,15 @@ init :: proc() {
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR_VERSION)  // order matters for macos
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR_VERSION)
 
-	window := glfw.CreateWindow(WINDOW_W, WINDOW_H, "Breakout", nil, nil)
-	if window == nil {
+	local_window := glfw.CreateWindow(WINDOW_W, WINDOW_H, "Breakout", nil, nil)
+	if local_window == nil {
 		log.error("Failed to created window")
 		os.exit(-1)
 	}
-	glfw.MakeContextCurrent(window)
+	glfw.MakeContextCurrent(local_window)
 
-	glfw.SetKeyCallback(window, key_callback)
-	glfw.SetFramebufferSizeCallback(window, framebuffer_size_callback)
+	glfw.SetKeyCallback(local_window, key_callback)
+	glfw.SetFramebufferSizeCallback(local_window, framebuffer_size_callback)
 
     // OpenGL config
     gl.load_up_to(GL_MAJOR_VERSION, GL_MINOR_VERSION, glfw.gl_set_proc_address)
@@ -280,13 +280,12 @@ init :: proc() {
     gl.Enable(gl.BLEND) // TODO: segfaults here
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
-    g_window = window
+    window = local_window
 
     game = Game{
        state = .Active,
        width = WINDOW_W,
        height = WINDOW_H,
-       // keys: [1024]bool,
     }
 
     projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1) // vertex coords == pixel coords
@@ -295,20 +294,20 @@ init :: proc() {
 
     resman_load_shader("shaders/sprite_v.glsl", "shaders/sprite_f.glsl", "", "sprite")
     sprite_shader := resman_get_shader("sprite")
-    use_program(sprite_shader)
+    shader_use(sprite_shader)
     shader_set_int(sprite_shader, "image", 0)
     shader_set_mat4(sprite_shader, "projection", &projection)
 
     resman_load_shader("shaders/particle_v.glsl", "shaders/particle_f.glsl", "", "particle")
     particle_shader := resman_get_shader("particle")
-    use_program(particle_shader)
+    shader_use(particle_shader)
     shader_set_int(particle_shader, "sprite", 0)
     shader_set_mat4(particle_shader, "projection", &projection)
 
     resman_load_shader("shaders/effects_v.glsl", "shaders/effects_f.glsl", "", "effects")
     effects_shader := resman_get_shader("effects")
-    use_program(effects_shader)
-    post_processor = post_processor_make(effects_shader, game.width, game.height)
+    shader_use(effects_shader)
+    effects = post_processor_make(effects_shader, game.width, game.height)
 
     renderer = sprite_renderer_make(sprite_shader)
 
@@ -325,6 +324,20 @@ init :: proc() {
     resman_load_texture("assets/powerup_speed.png", true, "speed")
     resman_load_texture("assets/powerup_sticky.png", true, "sticky")
 
+    resman_load_sound("assets/music.mp3", "music")
+    resman_load_sound("assets/bleep.mp3", "hit-nonsolid")
+    resman_load_sound("assets/solid.wav", "hit-solid")
+    resman_load_sound("assets/powerup.wav", "get-powerup")
+    resman_load_sound("assets/bleep.wav", "hit-paddle")
+
+    particle_tex := resman_get_texture("particle")
+    ball_pg = particle_generator_make(particle_shader, particle_tex)
+
+    result := ma.engine_init(nil, &audio_engine)
+    if result != ma.result.SUCCESS {
+        log.error("Failed to initialize audio engine")
+    }
+
     one: Game_Level
     two: Game_Level
     three: Game_Level
@@ -338,25 +351,13 @@ init :: proc() {
     append(&game.levels, three)
     append(&game.levels, four)
     game.level = 0
+
     player_pos := Vec2{ (f32(game.width) / 2) - (PLAYER_SIZE.x / 2), f32(game.height) - PLAYER_SIZE.y}
     player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
     ball_pos := player_pos + Vec2{f32(PLAYER_SIZE.x) / 2 - BALL_RADIUS, -BALL_RADIUS * 2}
     // ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
     ball = ball_object_make(ball_pos, BALL_RADIUS, {0, -450}, resman_get_texture("face"))
 
-    particle_tex := resman_get_texture("particle")
-    ball_pg = particle_generator_make(particle_shader, particle_tex)
-
-    result := ma.engine_init(nil, &audio_engine)
-    if result != ma.result.SUCCESS {
-        log.error("Failed to initialize audio engine")
-    }
-
-    resman_load_sound("assets/music.mp3", "music")
-    resman_load_sound("assets/bleep.mp3", "hit-nonsolid")
-    resman_load_sound("assets/solid.wav", "hit-solid")
-    resman_load_sound("assets/powerup.wav", "get-powerup")
-    resman_load_sound("assets/bleep.wav", "hit-paddle")
     play_sound("music")
 }
 
@@ -525,7 +526,7 @@ load_texture_from_file :: proc(file: string, alpha: bool) -> Texture2D {
 
 // TODO: use global renderer?
 draw_sprite :: proc(tex: Texture2D, position: Vec2, size: Vec2 = {10, 10}, rotate: f32 = 0, color: Vec3 = Vec3{1,1,1}) {
-    use_program(renderer.shader)
+    shader_use(renderer.shader)
     // NB: odin stores matrices in column-major order AND uses standard math multiplication. The tutorial uses glm which is also column-major BUT uses row-major multiplication syntax. In odin, the transformations (operations) must be in reverse math order Scale -> Rotate -> Translate.
     model := linalg.matrix4_scale(Vec3{size.x, size.y, 1})
     model = linalg.matrix4_translate(Vec3{-0.5 * size.x, -0.5 * size.y, 0}) * model
@@ -796,7 +797,7 @@ game_do_collisions :: proc() {
                     play_sound("hit-nonsolid")
                 } else {
                     g_shake_time = 0.1
-                    post_processor.shake = true
+                    effects.shake = true
                     play_sound("hit-solid")
                 }
                 if !(ball.passthrough && !box.is_solid) {
@@ -884,8 +885,8 @@ game_reset_player :: proc() {
     player.size = PLAYER_SIZE
     player.position = Vec2{f32(game.width) / 2 - (player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
     ball_reset(player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, INITIAL_BALL_VELOCITY)
-    post_processor.chaos = false
-    post_processor.confuse = false
+    effects.chaos = false
+    effects.confuse = false
     ball.passthrough = false
     ball.sticky = false
     ball.color = {1,1,1}
@@ -978,7 +979,7 @@ particle_generator_respawn_particle :: proc(pg: ^Particle_Generator, particle: ^
 
 particle_generator_draw :: proc(pg: Particle_Generator) {
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE)
-    use_program(pg.shader)
+    shader_use(pg.shader)
     for i in 0..<sa.len(pg.particles) {
         p := sa.get(pg.particles, i)
         if p.life > 0 {
@@ -1036,8 +1037,8 @@ post_processor_make :: proc(shader: Shader, width: u32, height: u32) -> Post_Pro
 
     // init render data and uniforms
     vao := post_processor_init_render_data()
-    use_program(shader)
-    shader_set_int(shader, "scene", 0) // , true) // what's with the true?..shader class has new param for its set functions: `useShader: bool`  which calls `use_program` before setting the value
+    shader_use(shader)
+    shader_set_int(shader, "scene", 0) // , true) // what's with the true?..shader class has new param for its set functions: `useShader: bool`  which calls `shader_use` before setting the value
     offset: f32 = 1./300
     offsets := [9][2]f32 {
         { -offset,  offset  },
@@ -1101,21 +1102,21 @@ post_processor_init_render_data :: proc() -> u32 {
     return vao
 }
 
-post_processor_begin_render :: proc(pp: Post_Processor) {
+effects_begin_render :: proc(pp: Post_Processor) {
     gl.BindFramebuffer(gl.FRAMEBUFFER, pp.msfbo)
     gl.ClearColor(0,0,0,1)
     gl.Clear(gl.COLOR_BUFFER_BIT)
 }
 
-post_processor_end_render :: proc(pp: Post_Processor) {
+effects_end_render :: proc(pp: Post_Processor) {
     gl.BindFramebuffer(gl.READ_FRAMEBUFFER, pp.msfbo)
     gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, pp.fbo)
     gl.BlitFramebuffer(0, 0, i32(pp.width), i32(pp.height), 0, 0, i32(pp.width), i32(pp.height), gl.COLOR_BUFFER_BIT, gl.NEAREST)
     gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
 }
 
-post_processor_render :: proc(pp: Post_Processor, time: f32) {
-    use_program(pp.shader)
+effects_render :: proc(pp: Post_Processor, time: f32) {
+    shader_use(pp.shader)
     shader_set_float(pp.shader, "time", time)
     shader_set_bool(pp.shader, "confuse", pp.confuse)
     shader_set_bool(pp.shader, "chaos", pp.chaos)
@@ -1220,12 +1221,12 @@ powerup_activate :: proc(p: ^Powerup_Object) {
     case .Padsize_Increase:
         player.size.x += 50
     case .Confuse:
-        if !post_processor.chaos {
-            post_processor.confuse = true
+        if !effects.chaos {
+            effects.confuse = true
         }
     case .Chaos:
-        if !post_processor.confuse {
-            post_processor.chaos = true
+        if !effects.confuse {
+            effects.chaos = true
         }
     }
 }
@@ -1252,11 +1253,11 @@ powerups_update :: proc(dt: f32) {
                     }
                 } else if p.type == .Confuse {
                     if !is_other_powerup_active(.Confuse) {
-                        post_processor.confuse = false
+                        effects.confuse = false
                     }
                 } else if p.type == .Chaos {
                     if !is_other_powerup_active(.Chaos) {
-                        post_processor.chaos = false
+                        effects.chaos = false
                     }
                 }
             }

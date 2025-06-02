@@ -57,7 +57,7 @@ shader_make :: proc( vertex_shader_filepath: string, fragment_shader_filepath: s
 	return Shader(shader_program), true
 }
 
-use_program :: proc(shader: Shader) {
+shader_use :: proc(shader: Shader) {
 	gl.UseProgram(shader)
 }
 
