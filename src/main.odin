@@ -11,6 +11,7 @@ import "core:math/rand"
 import "core:strings"
 import "core:strconv"
 import "vendor:glfw"
+import ma "vendor:miniaudio"
 import sa "core:container/small_array"
 import gl "vendor:OpenGL"
 import stbi "vendor:stb/image"
@@ -52,6 +53,7 @@ Sprite_Renderer :: struct {
 Resource_Manager :: struct {
     shaders: map[string]Shader,
     textures: map[string]Texture2D,
+    sounds: map[string]^ma.sound,
 }
 
 Game_Object :: struct {
@@ -318,7 +320,7 @@ init :: proc() {
     resman_load_texture("assets/particle.png", true, "particle")
     resman_load_texture("assets/powerup_chaos.png", true, "chaos")
     resman_load_texture("assets/powerup_confuse.png", true, "confuse")
-    resman_load_texture("assets/powerup_increase.png", true, "increase")
+    resman_load_texture("assets/powerup_increase.png", true, "size")
     resman_load_texture("assets/powerup_passthrough.png", true, "passthrough")
     resman_load_texture("assets/powerup_speed.png", true, "speed")
     resman_load_texture("assets/powerup_sticky.png", true, "sticky")
@@ -344,7 +346,21 @@ init :: proc() {
 
     particle_tex := resman_get_texture("particle")
     ball_pg = particle_generator_make(particle_shader, particle_tex)
+
+    result := ma.engine_init(nil, &audio_engine)
+    if result != ma.result.SUCCESS {
+        log.error("Failed to initialize audio engine")
+    }
+
+    resman_load_sound("assets/music.mp3", "music")
+    resman_load_sound("assets/bleep.mp3", "hit-nonsolid")
+    resman_load_sound("assets/solid.wav", "hit-solid")
+    resman_load_sound("assets/powerup.wav", "get-powerup")
+    resman_load_sound("assets/bleep.wav", "hit-paddle")
+    play_sound("music")
 }
+
+audio_engine: ma.engine
 
 ball_object_make :: proc(pos: Vec2, radius: f32 = 12.5, velocity: Vec2, sprite: Texture2D) -> Ball_Object {
     return Ball_Object{
@@ -411,6 +427,7 @@ resman_make :: proc() -> Resource_Manager {
     return {
         shaders = make(map[string]Shader),
         textures = make(map[string]Texture2D),
+        sounds = make(map[string]^ma.sound)
     }
 }
 
@@ -433,12 +450,49 @@ resman_get_texture :: proc(name: string) -> Texture2D {
     return resman.textures[name]
 }
 
+resman_load_sound :: proc(file: string, name: string) -> ^ma.sound {
+    sound := new(ma.sound)
+
+    file_cstring := strings.clone_to_cstring(file)
+    result := ma.sound_init_from_file(&audio_engine, file_cstring, nil, nil, nil, sound)
+    delete(file_cstring)
+
+    if result != ma.result.SUCCESS {
+        log.error("Failed to load sound:", file)
+        free(sound)
+        return nil
+    } 
+
+    log.info("Load sound, file:", file, "name:", name)
+    resman.sounds[name] = sound
+    return resman.sounds[name]
+}
+
+play_sound :: proc(name: string, loop: b32 = false) {
+    if sound, exists := resman.sounds[name]; exists {
+        ma.sound_set_looping(sound, loop)
+        ma.sound_seek_to_pcm_frame(sound, 0)
+        ma.sound_start(sound)
+    } else {
+        log.error("Failed to play sound:", name)
+    }
+}
+
+resman_get_sound :: proc(name: string) -> ^ma.sound {
+    sound, exists := resman.sounds[name]; 
+    if !exists do log.error("Failed to get sound:", name)
+    return sound
+}
+
 resman_clear :: proc() {
     for key, val in resman.shaders {
         gl.DeleteProgram(val)
     }
     for key, &val in resman.textures {
         gl.DeleteTextures(1, &val.id)
+    }
+    for key, &val in resman.sounds {
+        ma.sound_uninit(val)
     }
 }
 
@@ -739,9 +793,11 @@ game_do_collisions :: proc() {
                 if !box.is_solid {
                     box.destroyed = true
                     powerups_spawn(box)
+                    play_sound("hit-nonsolid")
                 } else {
                     g_shake_time = 0.1
                     post_processor.shake = true
+                    play_sound("hit-solid")
                 }
                 if !(ball.passthrough && !box.is_solid) {
                     dir := collision.direction
@@ -778,6 +834,7 @@ game_do_collisions :: proc() {
             if check_collision(player, p) {
                 powerup_activate(&p)
                 p.destroyed = true
+                play_sound("get-powerup")
             }
         }
     }
@@ -792,6 +849,7 @@ game_do_collisions :: proc() {
         ball.velocity.y = -1 * abs(ball.velocity.y)
         ball.velocity = linalg.normalize0(ball.velocity) * speed
         ball.stuck = ball.sticky
+        play_sound("hit-paddle")
     }
 }
 
@@ -1120,30 +1178,30 @@ should_spawn :: proc(chance: u32) -> bool {
 }
 
 powerups_spawn :: proc(block: Game_Object) {
-    // if should_spawn(75) { // 1 in 75 chance
-    //     p := powerup_make(.Speed, {0.5,0.5,1.0}, 0, block.position, resman_get_texture("speed"))
-    //     append(&game.powerups, p)
-    // }
-    if should_spawn(3) {
-        p := powerup_make(.Sticky, {1,0.5,1.0}, 3, block.position, resman_get_texture("sticky"))
+    if should_spawn(75) { // 1 in 75 chance
+        p := powerup_make(.Speed, {0.5,0.5,1.0}, 0, block.position, resman_get_texture("speed"))
         append(&game.powerups, p)
     }
-    // if should_spawn(3) {
-    //     p := powerup_make(.Passthrough, {0.5,1.0,0.5}, 3, block.position, resman_get_texture("passthrough"))
-    //     append(&game.powerups, p)
-    // }
-    // if should_spawn(75) {
-    //     p := powerup_make(.Padsize_Increase, {1.0,0.6,0.4}, 0, block.position, resman_get_texture("size"))
-    //     append(&game.powerups, p)
-    // }
-    // if should_spawn(15) {
-    //     p := powerup_make(.Confuse, {1.0,0.3,0.3}, 15, block.position, resman_get_texture("confuse"))
-    //     append(&game.powerups, p)
-    // }
-    // if should_spawn(15) {
-    //     p := powerup_make(.Chaos, {0.9,0.25,0.25}, 15, block.position, resman_get_texture("chaos"))
-    //     append(&game.powerups, p)
-    // }
+    if should_spawn(75) {
+        p := powerup_make(.Sticky, {1,0.5,1.0}, 5, block.position, resman_get_texture("sticky"))
+        append(&game.powerups, p)
+    }
+    if should_spawn(75) {
+        p := powerup_make(.Passthrough, {0.5,1.0,0.5}, 10, block.position, resman_get_texture("passthrough"))
+        append(&game.powerups, p)
+    }
+    if should_spawn(75) {
+        p := powerup_make(.Padsize_Increase, {1.0,0.6,0.4}, 0, block.position, resman_get_texture("size"))
+        append(&game.powerups, p)
+    }
+    if should_spawn(15) {
+        p := powerup_make(.Confuse, {1.0,0.3,0.3}, 15, block.position, resman_get_texture("confuse"))
+        append(&game.powerups, p)
+    }
+    if should_spawn(15) {
+        p := powerup_make(.Chaos, {0.9,0.25,0.25}, 15, block.position, resman_get_texture("chaos"))
+        append(&game.powerups, p)
+    }
 }
 
 powerup_activate :: proc(p: ^Powerup_Object) {
