@@ -28,7 +28,7 @@ shader_make :: proc( vertex_shader_filepath: string, fragment_shader_filepath: s
     geometry_shader_object: Shader_Object
     if geometry_shader_filepath != "" {
         geo_ok: bool
-        geometry_shader_object, geo_ok = load_shader_object_from_file(fragment_shader_filepath, gl.FRAGMENT_SHADER)
+        geometry_shader_object, geo_ok = load_shader_object_from_file(geometry_shader_filepath, gl.GEOMETRY_SHADER)
         if !geo_ok {
             return {}, false
         }
@@ -95,25 +95,37 @@ shader_set_bool :: proc(program: u32, name: string, value: bool) {
 }
 
 shader_set_int :: proc(program: u32, name: string, value: i32) {
-	gl.Uniform1i(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value)
+    cstring := strings.clone_to_cstring(name)
+	gl.Uniform1i(gl.GetUniformLocation(program, cstring), value)
+    delete(cstring)
 }
 
 shader_set_float :: proc(program: u32, name: string, value: f32) {
-	gl.Uniform1f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value)
+    cstring := strings.clone_to_cstring(name)
+	gl.Uniform1f(gl.GetUniformLocation(program, cstring), value)
+    delete(cstring)
 }
 
 shader_set_mat4 :: proc(program: u32, name: string, value: ^Mat4) {
-	gl.UniformMatrix4fv(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), 1, false, &value[0,0])
+    cstring := strings.clone_to_cstring(name)
+	gl.UniformMatrix4fv(gl.GetUniformLocation(program, cstring), 1, false, &value[0,0])
+    delete(cstring)
 }
 
 shader_set_vec2 :: proc(program: u32, name: string, value: Vec2) {
-	gl.Uniform2f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y)
+    cstring := strings.clone_to_cstring(name)
+	gl.Uniform2f(gl.GetUniformLocation(program, cstring), value.x, value.y)
+    delete(cstring)
 }
 
 shader_set_vec3 :: proc(program: u32, name: string, value: Vec3) {
-	gl.Uniform3f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y, value.z)
+    cstring := strings.clone_to_cstring(name)
+	gl.Uniform3f(gl.GetUniformLocation(program, cstring), value.x, value.y, value.z)
+    delete(cstring)
 }
 
 shader_set_vec4 :: proc(program: u32, name: string, value: Vec4) {
-	gl.Uniform4f(gl.GetUniformLocation(program, strings.clone_to_cstring(name)), value.x, value.y, value.z, value.w)
+    cstring := strings.clone_to_cstring(name)
+	gl.Uniform4f(gl.GetUniformLocation(program, cstring), value.x, value.y, value.z, value.w)
+    delete(cstring)
 }

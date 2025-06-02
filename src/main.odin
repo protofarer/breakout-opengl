@@ -35,6 +35,7 @@ Game :: struct {
     height: u32,
     levels: [dynamic]Game_Level,
     level: u32,
+    powerups: [dynamic]Powerup_Object,
 }
 
 Game_State :: enum {
@@ -73,6 +74,8 @@ Ball_Object :: struct {
     using game_object: Game_Object,
     radius: f32,
     stuck: bool,
+    sticky: bool,
+    passthrough: bool,
 }
 
 Direction :: enum {
@@ -124,8 +127,9 @@ resman: Resource_Manager
 renderer: Sprite_Renderer
 player: Game_Object
 ball: Ball_Object
-
 ball_pg: Particle_Generator
+post_processor: Post_Processor
+g_shake_time: f32
 
 main :: proc() {
     init()
@@ -152,9 +156,17 @@ main :: proc() {
 
 update :: proc(dt: f32) {
     process_input(dt)
+
     ball_move(dt, game.width)
-    particle_generator_update(&ball_pg, dt, ball, 2, {ball.radius / 2, ball.radius / 2})
     game_do_collisions()
+    particle_generator_update(&ball_pg, dt, ball, 2, {ball.radius / 2, ball.radius / 2})
+    powerups_update(dt)
+    if g_shake_time > 0 {
+        g_shake_time -= dt
+        if g_shake_time <= 0 {
+            post_processor.shake = false
+        }
+    }
     if ball.position.y >= f32(game.height) {
         game_reset_level()
         game_reset_player()
@@ -162,15 +174,22 @@ update :: proc(dt: f32) {
 }
 
 render :: proc(dt: f32) {
-    gl.ClearColor(0,0,0,1)
-    gl.Clear(gl.COLOR_BUFFER_BIT)
     if game.state == .Active {
-        tex_bg := resman_get_texture("background")
-        draw_sprite(tex_bg, {0,0}, {f32(game.width), f32(game.height)}, 0)
-        game_level_draw(&game.levels[game.level])
-        game_object_draw(player)
-        particle_generator_draw(ball_pg)
-        game_object_draw(ball.game_object)
+        post_processor_begin_render(post_processor)
+
+            draw_sprite(resman_get_texture("background"), {0,0}, {f32(game.width), f32(game.height)}, 0)
+            game_level_draw(&game.levels[game.level])
+            game_object_draw(player)
+            for p in game.powerups {
+                if !p.destroyed {
+                    game_object_draw(p)
+                }
+            }
+            particle_generator_draw(ball_pg)
+            game_object_draw(ball.game_object)
+
+        post_processor_end_render(post_processor)
+        post_processor_render(post_processor, f32(glfw.GetTime()))
     }
     glfw.SwapBuffers(g_window)
 }
@@ -224,7 +243,6 @@ process_input :: proc(dt: f32) {
     }
 
     player.position.x = clamp(player.position.x, 0, f32(game.width) - player.size.x)
-    ball.position.x = clamp(ball.position.x, (player.size.x / 2) - ball.radius, f32(game.width) - (player.size.x / 2) - ball.radius)
 }
 
  // initialize game state (load all shaders/textures/levels gameplay state)
@@ -285,6 +303,11 @@ init :: proc() {
     shader_set_int(particle_shader, "sprite", 0)
     shader_set_mat4(particle_shader, "projection", &projection)
 
+    resman_load_shader("shaders/effects_v.glsl", "shaders/effects_f.glsl", "", "effects")
+    effects_shader := resman_get_shader("effects")
+    use_program(effects_shader)
+    post_processor = post_processor_make(effects_shader, game.width, game.height)
+
     renderer = sprite_renderer_make(sprite_shader)
 
     resman_load_texture("assets/background.jpg", false, "background")
@@ -293,6 +316,12 @@ init :: proc() {
     resman_load_texture("assets/block_solid.png", false, "block_solid")
     resman_load_texture("assets/paddle.png", true, "paddle")
     resman_load_texture("assets/particle.png", true, "particle")
+    resman_load_texture("assets/powerup_chaos.png", true, "chaos")
+    resman_load_texture("assets/powerup_confuse.png", true, "confuse")
+    resman_load_texture("assets/powerup_increase.png", true, "increase")
+    resman_load_texture("assets/powerup_passthrough.png", true, "passthrough")
+    resman_load_texture("assets/powerup_speed.png", true, "speed")
+    resman_load_texture("assets/powerup_sticky.png", true, "sticky")
 
     one: Game_Level
     two: Game_Level
@@ -310,7 +339,8 @@ init :: proc() {
     player_pos := Vec2{ (f32(game.width) / 2) - (PLAYER_SIZE.x / 2), f32(game.height) - PLAYER_SIZE.y}
     player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
     ball_pos := player_pos + Vec2{f32(PLAYER_SIZE.x) / 2 - BALL_RADIUS, -BALL_RADIUS * 2}
-    ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
+    // ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
+    ball = ball_object_make(ball_pos, BALL_RADIUS, {0, -450}, resman_get_texture("face"))
 
     particle_tex := resman_get_texture("particle")
     ball_pg = particle_generator_make(particle_shader, particle_tex)
@@ -344,13 +374,13 @@ Texture2D :: struct {
     filter_max: i32,
 }
 
-texture2d_make :: proc() -> Texture2D {
+texture2d_make :: proc(alpha: bool) -> Texture2D {
     id: u32
     gl.GenTextures(1, &id)
     return {
         id = id,
-        internal_format= gl.RGB,
-        image_format= gl.RGB,
+        internal_format= alpha ? gl.RGBA : gl.RGB,
+        image_format= alpha ? gl.RGBA : gl.RGB,
         wrap_s= gl.REPEAT,
         wrap_t= gl.REPEAT,
         filter_min= gl.LINEAR,
@@ -431,11 +461,7 @@ load_texture_from_file :: proc(file: string, alpha: bool) -> Texture2D {
         os.exit(-1)
     }
 
-    tex := texture2d_make()
-    if alpha {
-        tex.internal_format = gl.RGBA
-        tex.image_format = gl.RGBA
-    }
+    tex := texture2d_make(alpha)
 
     texture2d_generate(&tex, width, height, tex_data)
     stbi.image_free(tex_data)
@@ -496,9 +522,9 @@ sprite_renderer_destroy :: proc() {
     gl.DeleteVertexArrays(1, &renderer.quad_vao)
 }
 
-game_object_make :: proc(pos: Vec2 = {0,0}, size: Vec2 = {1,1}, sprite: Texture2D, color: Vec3 = {1,1,1}, velocity: Vec2 = {0,0}) -> Game_Object {
+game_object_make :: proc(position: Vec2 = {0,0}, size: Vec2 = {1,1}, sprite: Texture2D, color: Vec3 = {1,1,1}, velocity: Vec2 = {0,0}) -> Game_Object {
     return {
-        position = pos,
+        position = position,
         size = size,
         velocity = velocity,
         color = color,
@@ -660,6 +686,7 @@ ball_move :: proc(dt: f32, window_width: u32) -> Vec2 {
             ball.position.y = 0
         }
     }
+    // ball.position.x = clamp(ball.position.x, 0, f32(game.width) - (player.size.x / 2) - ball.radius)
     return ball.position
 }
 
@@ -667,6 +694,8 @@ ball_reset :: proc(position: Vec2, velocity: Vec2) {
     ball.position = position
     ball.velocity = velocity
     ball.stuck = true
+    ball.sticky = false
+    ball.passthrough = false
 }
 
 check_collision :: proc(a: Game_Object, b: Game_Object) -> bool {
@@ -709,6 +738,12 @@ game_do_collisions :: proc() {
             if collision.collided {
                 if !box.is_solid {
                     box.destroyed = true
+                    powerups_spawn(box)
+                } else {
+                    g_shake_time = 0.1
+                    post_processor.shake = true
+                }
+                if !(ball.passthrough && !box.is_solid) {
                     dir := collision.direction
                     diff_vector := collision.difference_vector
                     // horz coll
@@ -720,7 +755,7 @@ game_do_collisions :: proc() {
                         } else {
                             ball.position.x -= penetration
                         }
-                    // vert coll
+                        // vert coll
                     } else {
                         ball.velocity.y *= -1
                         penetration := ball.radius - abs(diff_vector.y)
@@ -735,6 +770,17 @@ game_do_collisions :: proc() {
             }
         }
     }
+    for &p in game.powerups {
+        if !p.destroyed {
+            if p.position.y >= f32(game.height) {
+                p.destroyed = true
+            }
+            if check_collision(player, p) {
+                powerup_activate(&p)
+                p.destroyed = true
+            }
+        }
+    }
     collision := check_ball_box_collision(ball, player)
     if !ball.stuck && collision.collided {
         center_board := player.position.x + (player.size.x / 2)
@@ -745,7 +791,7 @@ game_do_collisions :: proc() {
         ball.velocity.x = INITIAL_BALL_VELOCITY.x * pct * strength
         ball.velocity.y = -1 * abs(ball.velocity.y)
         ball.velocity = linalg.normalize0(ball.velocity) * speed
-
+        ball.stuck = ball.sticky
     }
 }
 
@@ -773,12 +819,18 @@ game_reset_level :: proc() {
     case 3:
         game_level_load(&game.levels[3], "assets/four.lvl", game.width, game.height/2)
     }
+    clear(&game.powerups)
 }
 
 game_reset_player :: proc() {
     player.size = PLAYER_SIZE
     player.position = Vec2{f32(game.width) / 2 - (player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
     ball_reset(player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, INITIAL_BALL_VELOCITY)
+    post_processor.chaos = false
+    post_processor.confuse = false
+    ball.passthrough = false
+    ball.sticky = false
+    ball.color = {1,1,1}
 }
 
 particle_generator_make :: proc(shader: Shader, texture: Texture2D) -> Particle_Generator {
@@ -887,4 +939,288 @@ particle_make :: proc() -> Particle {
     return {
         color = {1,1,1,1}
     }
+}
+
+Post_Processor :: struct {
+    shader: Shader,
+    texture: Texture2D,
+    width: u32,
+    height: u32,
+    confuse, chaos, shake: bool,
+    msfbo, fbo, rbo, vao: u32,
+}
+
+post_processor_make :: proc(shader: Shader, width: u32, height: u32) -> Post_Processor {
+    // init renderbuffer & framebuffer objects
+    msfbo, fbo, rbo: u32
+    gl.GenFramebuffers(1, &msfbo)
+    gl.GenFramebuffers(1, &fbo)
+    gl.GenRenderbuffers(1, &rbo)
+
+    // init renderbuffer storage with a multisampled color buffer, no depth/stencil bufffer
+    gl.BindFramebuffer(gl.FRAMEBUFFER, msfbo)
+    gl.BindRenderbuffer(gl.RENDERBUFFER, rbo)
+    gl.RenderbufferStorageMultisample(gl.RENDERBUFFER, 4, gl.RGB, i32(width), i32(height))
+    gl.FramebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, rbo)
+    if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+        log.error("Postprocessor: Failed to initialize MSFBO")
+    }
+
+    // init FBO/texture to blit multisampled color buffer to; used for shader ops (postprocessing effects)
+    gl.BindFramebuffer(gl.FRAMEBUFFER, fbo)
+    tex := texture2d_make(true)
+    texture2d_generate(&tex, i32(width), i32(height), nil)
+    gl.FramebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex.id, 0)
+    if gl.CheckFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE {
+        log.error("Postprocessor: Failed to initialize FBO")
+    }
+    gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+
+    // init render data and uniforms
+    vao := post_processor_init_render_data()
+    use_program(shader)
+    shader_set_int(shader, "scene", 0) // , true) // what's with the true?..shader class has new param for its set functions: `useShader: bool`  which calls `use_program` before setting the value
+    offset: f32 = 1./300
+    offsets := [9][2]f32 {
+        { -offset,  offset  },
+        { 0,        offset  },
+        { offset,   offset  },
+        { -offset,  0       },
+        { 0,        0       },
+        { offset,   0       },
+        { -offset,  -offset },
+        { 0,        -offset },
+        { offset,   -offset },
+    }
+    gl.Uniform2fv(gl.GetUniformLocation(shader, "offsets"), 9, &offsets[0][0])
+    edge_kernel := [9]i32 {
+        -1, -1, -1,
+        -1,  8, -1,
+        -1, -1, -1
+    }
+    gl.Uniform1iv(gl.GetUniformLocation(shader, "edge_kernel"), 9, &edge_kernel[0]);
+    blur_kernel := [9]f32 {
+        1./16, 2./16, 1./16,
+        2./16, 4./16, 2./16,
+        1./16, 2./16, 1./16
+    };
+    gl.Uniform1fv(gl.GetUniformLocation(shader, "blur_kernel"), 9, &blur_kernel[0]);
+
+    return {
+        msfbo = msfbo,
+        fbo = fbo,
+        rbo = rbo,
+        vao = vao,
+        texture = tex,
+        width = width,
+        height = height,
+        shader = shader,
+    }
+}
+
+post_processor_init_render_data :: proc() -> u32 {
+    vbo, vao: u32
+    gl.GenBuffers(1, &vbo)
+    gl.GenVertexArrays(1, &vao)
+    vertices := [?]f32 {
+         // pos        // tex
+        -1.0, -1.0, 0.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+        -1.0,  1.0, 0.0, 1.0,
+
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+         1.0,  1.0, 1.0, 1.0
+    }
+    gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.BufferData(gl.ARRAY_BUFFER, size_of(vertices), &vertices, gl.STATIC_DRAW)
+
+    gl.BindVertexArray(vao)
+    gl.EnableVertexAttribArray(0)
+    gl.VertexAttribPointer(0, 4, gl.FLOAT, gl.FALSE, 4 * size_of(f32), uintptr(0))
+    gl.BindBuffer(gl.ARRAY_BUFFER, 0)
+    gl.BindVertexArray(0)
+    return vao
+}
+
+post_processor_begin_render :: proc(pp: Post_Processor) {
+    gl.BindFramebuffer(gl.FRAMEBUFFER, pp.msfbo)
+    gl.ClearColor(0,0,0,1)
+    gl.Clear(gl.COLOR_BUFFER_BIT)
+}
+
+post_processor_end_render :: proc(pp: Post_Processor) {
+    gl.BindFramebuffer(gl.READ_FRAMEBUFFER, pp.msfbo)
+    gl.BindFramebuffer(gl.DRAW_FRAMEBUFFER, pp.fbo)
+    gl.BlitFramebuffer(0, 0, i32(pp.width), i32(pp.height), 0, 0, i32(pp.width), i32(pp.height), gl.COLOR_BUFFER_BIT, gl.NEAREST)
+    gl.BindFramebuffer(gl.FRAMEBUFFER, 0)
+}
+
+post_processor_render :: proc(pp: Post_Processor, time: f32) {
+    use_program(pp.shader)
+    shader_set_float(pp.shader, "time", time)
+    shader_set_bool(pp.shader, "confuse", pp.confuse)
+    shader_set_bool(pp.shader, "chaos", pp.chaos)
+    shader_set_bool(pp.shader, "shake", pp.shake)
+    // render textured quad
+    gl.ActiveTexture(gl.TEXTURE0)
+    texture_bind(pp.texture)
+    gl.BindVertexArray(pp.vao)
+    gl.DrawArrays(gl.TRIANGLES, 0, 6)
+    gl.BindVertexArray(0)
+}
+
+POWERUP_SIZE :: Vec2{60,20}
+POWERUP_VELOCITY :: Vec2{0,150}
+
+Powerup_Type :: enum {
+     // Speed: increases the velocity of the ball by 20%.
+    Speed,
+     // Sticky: when the ball collides with the paddle, the ball remains stuck to the paddle unless the spacebar is pressed again. This allows the player to better position the ball before releasing it.
+    Sticky,
+     // Pass-Through: collision resolution is disabled for non-solid blocks, allowing the ball to pass through multiple blocks.
+    Passthrough,
+     // Pad-Size-Increase: increases the width of the paddle by 50 pixels.
+    Padsize_Increase,
+     // Confuse: activates the confuse postprocessing effect for a short period of time, confusing the user
+    Confuse,
+     // Chaos: activates the chaos postprocessing effect for a short period of time, heavily disorienting the user.
+    Chaos,
+}
+
+Powerup_Object :: struct {
+    using object: Game_Object,
+    type: Powerup_Type,
+    activated: bool,
+    duration: f32,
+}
+
+powerup_make :: proc(type: Powerup_Type, color: Vec3, duration: f32, position: Vec2, texture: Texture2D) -> Powerup_Object {
+    o := game_object_make(position = position, size = POWERUP_SIZE, sprite = texture, color = color, velocity = POWERUP_VELOCITY)
+    return {
+        position = o.position,
+        size = o.size, 
+        velocity = o.velocity,
+        color = o.color,
+        rotation = o.rotation,
+        is_solid = o.is_solid,
+        destroyed = o.destroyed,
+        sprite = o.sprite,
+        // Powerup specific
+        type = type,
+        duration = duration,
+        activated = false,
+    }
+}
+
+should_spawn :: proc(chance: u32) -> bool {
+    chance := 1 / f32(chance)
+    rgn := rand.float32()
+    return rgn < chance
+}
+
+powerups_spawn :: proc(block: Game_Object) {
+    // if should_spawn(75) { // 1 in 75 chance
+    //     p := powerup_make(.Speed, {0.5,0.5,1.0}, 0, block.position, resman_get_texture("speed"))
+    //     append(&game.powerups, p)
+    // }
+    if should_spawn(3) {
+        p := powerup_make(.Sticky, {1,0.5,1.0}, 3, block.position, resman_get_texture("sticky"))
+        append(&game.powerups, p)
+    }
+    // if should_spawn(3) {
+    //     p := powerup_make(.Passthrough, {0.5,1.0,0.5}, 3, block.position, resman_get_texture("passthrough"))
+    //     append(&game.powerups, p)
+    // }
+    // if should_spawn(75) {
+    //     p := powerup_make(.Padsize_Increase, {1.0,0.6,0.4}, 0, block.position, resman_get_texture("size"))
+    //     append(&game.powerups, p)
+    // }
+    // if should_spawn(15) {
+    //     p := powerup_make(.Confuse, {1.0,0.3,0.3}, 15, block.position, resman_get_texture("confuse"))
+    //     append(&game.powerups, p)
+    // }
+    // if should_spawn(15) {
+    //     p := powerup_make(.Chaos, {0.9,0.25,0.25}, 15, block.position, resman_get_texture("chaos"))
+    //     append(&game.powerups, p)
+    // }
+}
+
+powerup_activate :: proc(p: ^Powerup_Object) {
+    p.activated = true
+    // apply effect
+    // set timer, ensure is ticked
+    switch p.type {
+    case .Speed:
+        ball.velocity *= 1.2
+    case .Sticky:
+        ball.sticky = true
+        player.color = {1,0.5,1}
+    case .Passthrough:
+        ball.passthrough = true
+        ball.color = {1,0.5,0.5}
+    case .Padsize_Increase:
+        player.size.x += 50
+    case .Confuse:
+        if !post_processor.chaos {
+            post_processor.confuse = true
+        }
+    case .Chaos:
+        if !post_processor.confuse {
+            post_processor.chaos = true
+        }
+    }
+}
+
+powerups_update :: proc(dt: f32) {
+    for &p in game.powerups {
+        p.position += p.velocity * dt
+
+        if p.activated {
+            p.duration -= dt
+
+            if p.duration <= 0 {
+                p.activated = false
+
+                if p.type == .Sticky {
+                    if !is_other_powerup_active(.Sticky) {
+                        ball.sticky = false
+                        player.color = {1,1,1}
+                    }
+                } else if p.type == .Passthrough {
+                    if !is_other_powerup_active(.Passthrough) {
+                        ball.passthrough = false
+                        ball.color = {1,1,1}
+                    }
+                } else if p.type == .Confuse {
+                    if !is_other_powerup_active(.Confuse) {
+                        post_processor.confuse = false
+                    }
+                } else if p.type == .Chaos {
+                    if !is_other_powerup_active(.Chaos) {
+                        post_processor.chaos = false
+                    }
+                }
+            }
+        }
+    }
+    indices_to_remove: [dynamic]int
+    defer delete(indices_to_remove)
+    for p, i in game.powerups {
+        if p.destroyed && !p.activated {
+            append(&indices_to_remove, i)
+        }
+    }
+    for idx in indices_to_remove {
+        unordered_remove(&game.powerups, idx)
+    }
+}
+
+is_other_powerup_active :: proc(type: Powerup_Type) -> bool {
+    for p in game.powerups {
+        if p.activated && p.type == type {
+            return true
+        }
+    }
+    return false
 }
