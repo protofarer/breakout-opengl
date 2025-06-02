@@ -19,28 +19,50 @@ import stbtt "vendor:stb/truetype"
 
 pr :: fmt.println
 
-WINDOW_W :: 800
-WINDOW_H :: 600
+LOGICAL_W :: 800
+LOGICAL_H :: 600
 
 GL_MAJOR_VERSION :: 3
 GL_MINOR_VERSION :: 3
+
+PLAYER_SIZE :: Vec2{100, 20}
+PLAYER_VELOCITY :: 500
+
+BALL_RADIUS :: 12.5
+BALL_INITIAL_VELOCITY :: Vec2{100, -350}
+
+MAX_PARTICLES :: 500
 
 Vec2 :: [2]f32
 Vec2i :: [2]i32
 Vec3 :: [3]f32
 Vec4 :: [4]f32
-Mat4 :: matrix[4,4]f32
 
 Game :: struct {
     state: Game_State,
+
     keys: [1024]bool,
     keys_processed: [1024]bool,
+
     width: u32,
     height: u32,
+
+    player: Game_Object,
+    ball: Ball_Object,
+
     levels: [dynamic]Game_Level,
     level: u32,
     powerups: [dynamic]Powerup_Object,
     lives: i32,
+
+    shake_time: f32,
+
+    screen_width: u32,
+    screen_height: u32,
+    viewport_x: i32,
+    viewport_y: i32,
+    viewport_width: i32,
+    viewport_height: i32,
 }
 
 Game_State :: enum {
@@ -119,30 +141,22 @@ Particle_Generator :: struct {
     vao: u32,
 }
 
-PLAYER_SIZE :: Vec2{100, 20}
-PLAYER_VELOCITY :: 500
-
-BALL_RADIUS :: 12.5
-INITIAL_BALL_VELOCITY :: Vec2{100, -350}
-
-MAX_PARTICLES :: 500
-
 game: Game
+
 window: glfw.WindowHandle
 resman: Resource_Manager
-renderer: Sprite_Renderer
-player: Game_Object
-ball: Ball_Object
+audio_engine: ma.engine
+
+sprite_renderer: Sprite_Renderer
 ball_pg: Particle_Generator
 effects: Post_Processor
-g_shake_time: f32
 text_renderer: Text_Renderer
+
 
 main :: proc() {
     init()
 
     last_frame: f32
-
 	for !glfw.WindowShouldClose(window) {
         current_frame := f32(glfw.GetTime())
         dt := current_frame - last_frame
@@ -157,6 +171,7 @@ main :: proc() {
 	}
 
     resman_clear()
+    text_renderer_cleanup(&text_renderer)
 	glfw.Terminate()
 	glfw.DestroyWindow(window)
 }
@@ -166,15 +181,16 @@ update :: proc(dt: f32) {
 
     ball_move(dt, game.width)
     game_do_collisions()
-    particle_generator_update(&ball_pg, dt, ball, 2, {ball.radius / 2, ball.radius / 2})
+    particle_generator_update(&ball_pg, dt, game.ball, 2, {game.ball.radius / 2, game.ball.radius / 2})
     powerups_update(dt)
-    if g_shake_time > 0 {
-        g_shake_time -= dt
-        if g_shake_time <= 0 {
+
+    if game.shake_time > 0 {
+        game.shake_time -= dt
+        if game.shake_time <= 0 {
             effects.shake = false
         }
     }
-    if ball.position.y >= f32(game.height) {
+    if game.ball.position.y >= f32(game.height) {
         game.lives -= 1
         if game.lives == 0 {
             game_reset_level()
@@ -191,36 +207,40 @@ update :: proc(dt: f32) {
 }
 
 render :: proc(dt: f32) {
-    if game.state == .Active || game.state == .Menu {
-        effects_begin_render(effects)
+    gl.Viewport(0, 0, i32(game.screen_width), i32(game.screen_height))
+    gl.ClearColor(.08,.08,.08,1)
+    gl.Clear(gl.COLOR_BUFFER_BIT)
 
-            draw_sprite(resman_get_texture("background"), {0,0}, {f32(game.width), f32(game.height)}, 0)
-            game_level_draw(&game.levels[game.level])
-            game_object_draw(player)
-            for p in game.powerups {
-                if !p.destroyed {
-                    game_object_draw(p)
-                }
+    effects_begin_render(effects)
+        draw_sprite(resman_get_texture("background"), {0,0}, {f32(game.width), f32(game.height)}, 0)
+        game_level_draw(&game.levels[game.level])
+        game_object_draw(game.player)
+        for p in game.powerups {
+            if !p.destroyed {
+                game_object_draw(p)
             }
-            particle_generator_draw(ball_pg)
-            game_object_draw(ball.game_object)
+        }
+        particle_generator_draw(ball_pg)
+        game_object_draw(game.ball.game_object)
+    effects_end_render(effects)
 
-        effects_end_render(effects)
-        effects_render(effects, f32(glfw.GetTime()))
+    effects_render(effects, f32(glfw.GetTime()))
 
-        // text_renderer_render_text(&text_renderer, "Hello, World!", 5.0, 5.0, 1.0)
-        lives := fmt.tprintf("Lives:%v", game.lives)
-        text_renderer_render_text(&text_renderer, lives, 5.0, 5.0, 1.0)
-    }
+    gl.Viewport(game.viewport_x, game.viewport_y, game.viewport_width, game.viewport_height)
+    lives := fmt.tprintf("Lives:%v", game.lives)
+    text_renderer_render_text(&text_renderer, lives, 5.0, 5.0, 1.0)
+
     if game.state == .Menu {
-        text_renderer_render_text(&text_renderer, "Press ENTER to start", 250, WINDOW_H / 2, 1)
-        text_renderer_render_text(&text_renderer, "Press W or S to select level", 245, WINDOW_H / 2 + 20, 0.75)
+        text_renderer_render_text(&text_renderer, "Press ENTER to start", 320, LOGICAL_H / 2 + 20, 1)
+        text_renderer_render_text(&text_renderer, "Press W or S to select level", 325, LOGICAL_H / 2 + 45, 0.75)
     }
+
     if game.state == .Win {
-        text_renderer_render_text(&text_renderer, "You WON!!!", 320, WINDOW_H / 2 + 20, 1.2, {0,1,0})
-        text_renderer_render_text(&text_renderer, "Press ENTER to retry or ESC to quit", 200, WINDOW_H / 2+ 60, 1.2, {1,1,0})
+        text_renderer_render_text(&text_renderer, "You WON!!!", 320, LOGICAL_H / 2 + 20, 1.2, {0,1,0})
+        text_renderer_render_text(&text_renderer, "Press ENTER to retry or ESC to quit", 200, LOGICAL_H / 2+ 60, 1.2, {1,1,0})
 
     }
+
     glfw.SwapBuffers(window)
 }
 
@@ -228,7 +248,6 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 	if key == glfw.KEY_ESCAPE && action == glfw.PRESS {
 		glfw.SetWindowShouldClose(window, glfw.TRUE)
 	}
-
     if key >= 0 && key < 1024 {
         if action == glfw.PRESS {
             game.keys[key] = true
@@ -240,7 +259,8 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 }
 
 framebuffer_size_callback :: proc "c" (window: glfw.WindowHandle, width, height: i32) {
-	gl.Viewport(0,0,width,height)
+    context = runtime.default_context()
+    update_viewport_and_projection(u32(width), u32(height))
 }
 
 error_callback :: proc "c" (code: i32, desc: cstring) {
@@ -251,45 +271,39 @@ error_callback :: proc "c" (code: i32, desc: cstring) {
 process_input :: proc(dt: f32) {
     if game.state == .Menu {
         if game.keys[glfw.KEY_ENTER] && !game.keys_processed[glfw.KEY_ENTER]{
-            game.state = .Active
             game.keys_processed[glfw.KEY_ENTER] = true
+            game.state = .Active
         }
         if game.keys[glfw.KEY_W] && !game.keys_processed[glfw.KEY_W] {
-            game.level = (game.level + 1) % 4
             game.keys_processed[glfw.KEY_W] = true
+            game.level = (game.level + 1) % 4
         }
         if game.keys[glfw.KEY_S] && !game.keys_processed[glfw.KEY_S] {
             game.keys_processed[glfw.KEY_S] = true
-            if game.level > 0 {
-                game.level -= 1
-            } else {
-                game.level = 3
-            }
+            game.level = (game.level - 1) % 4
         }
     }
-
     if game.state == .Active {
         dx := PLAYER_VELOCITY * dt
         if game.keys[glfw.KEY_A] {
-            if player.position.x >= 0 {
-                player.position.x -= dx
-                if ball.stuck {
-                    ball.position.x -= dx
+            if game.player.position.x >= 0 {
+                game.player.position.x -= dx
+                if game.ball.stuck {
+                    game.ball.position.x -= dx
                 }
             }
         }
         if game.keys[glfw.KEY_D] {
-            if player.position.x <= f32(game.width) - player.size.x {
-                player.position.x += dx
-                if ball.stuck {
-                    ball.position.x += dx
+            if game.player.position.x <= f32(game.width) - game.player.size.x {
+                game.player.position.x += dx
+                if game.ball.stuck {
+                    game.ball.position.x += dx
                 }
             }
         }
         if game.keys[glfw.KEY_SPACE] {
-            ball.stuck = false
+            game.ball.stuck = false
         }
-
         if game.keys[glfw.KEY_R] {
             // win state
             game_reset_level()
@@ -297,64 +311,67 @@ process_input :: proc(dt: f32) {
             effects.chaos = true
             game.state = .Win
         }
-
-        player.position.x = clamp(player.position.x, 0, f32(game.width) - player.size.x)
+        game.player.position.x = clamp(game.player.position.x, 0, f32(game.width) - game.player.size.x)
     }
-
     if game.state == .Win {
         if game.keys[glfw.KEY_ENTER] {
-            game.keys_processed[glfw.KEY_ENTER] = true // NOTE: is this needed?
+            // game.keys_processed[glfw.KEY_ENTER] = true // NOTE: is this needed?
             effects.chaos = false
             game.state = .Menu
         }
     }
 }
 
- // initialize game state (load all shaders/textures/levels gameplay state)
 init :: proc() {
     context.logger = log.create_console_logger()
 
     glfw.SetErrorCallback(error_callback)
 
-	if glfw.Init() == glfw.FALSE {
+	if !bool(glfw.Init()) {
 		log.error("Failed to init GLFW")
 		os.exit(-1)
 	}
 
-	glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
+	// glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
 	glfw.WindowHint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
 	glfw.WindowHint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MAJOR, GL_MAJOR_VERSION)  // order matters for macos
 	glfw.WindowHint(glfw.CONTEXT_VERSION_MINOR, GL_MINOR_VERSION)
 
-	local_window := glfw.CreateWindow(WINDOW_W, WINDOW_H, "Breakout", nil, nil)
-	if local_window == nil {
+	window_handle := glfw.CreateWindow(LOGICAL_W, LOGICAL_H, "Breakout", nil, nil)
+	if window_handle == nil {
 		log.error("Failed to created window")
 		os.exit(-1)
 	}
-	glfw.MakeContextCurrent(local_window)
 
-	glfw.SetKeyCallback(local_window, key_callback)
-	glfw.SetFramebufferSizeCallback(local_window, framebuffer_size_callback)
-
-    // OpenGL config
+	glfw.MakeContextCurrent(window_handle)
     gl.load_up_to(GL_MAJOR_VERSION, GL_MINOR_VERSION, glfw.gl_set_proc_address)
-    gl.Viewport(0,0,WINDOW_W, WINDOW_H)
+
+	glfw.SetKeyCallback(window_handle, key_callback)
+	glfw.SetFramebufferSizeCallback(window_handle, framebuffer_size_callback)
+
+    gl.Viewport(0,0,LOGICAL_W, LOGICAL_H)
     gl.Enable(gl.BLEND) // TODO: segfaults here
     gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
-    window = local_window
+    window = window_handle
 
     game = Game{
        state = .Menu,
-       width = WINDOW_W,
-       height = WINDOW_H,
+       width = LOGICAL_W,
+       height = LOGICAL_H,
+       screen_width = LOGICAL_W,
+       screen_height = LOGICAL_H,
+       viewport_width = LOGICAL_W,
+       viewport_height = LOGICAL_H,
        lives = 3,
     }
 
+    update_viewport_and_projection(LOGICAL_W, LOGICAL_H)
+
     projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1) // vertex coords == pixel coords
 
-    resman = resman_make()
+    resman_init(&resman)
 
     resman_load_shader("shaders/sprite_v.glsl", "shaders/sprite_f.glsl", "", "sprite")
     sprite_shader := resman_get_shader("sprite")
@@ -371,9 +388,9 @@ init :: proc() {
     resman_load_shader("shaders/effects_v.glsl", "shaders/effects_f.glsl", "", "effects")
     effects_shader := resman_get_shader("effects")
     shader_use(effects_shader)
-    effects = post_processor_make(effects_shader, game.width, game.height)
+    post_processor_init(&effects, effects_shader, game.width, game.height)
 
-    renderer = sprite_renderer_make(sprite_shader)
+    sprite_renderer_init(&sprite_renderer, sprite_shader)
 
     resman_load_texture("assets/background.jpg", false, "background")
     resman_load_texture("assets/awesomeface.png", true, "face")
@@ -401,15 +418,12 @@ init :: proc() {
     resman_load_sound("assets/bleep.wav", "hit-paddle")
 
     particle_tex := resman_get_texture("particle")
-    ball_pg = particle_generator_make(particle_shader, particle_tex)
+    particle_generator_init(&ball_pg, particle_shader, particle_tex)
 
-    text_renderer_make(&text_renderer, WINDOW_W, WINDOW_H)
+    text_renderer_init(&text_renderer, LOGICAL_W, LOGICAL_H)
     text_renderer_load(&text_renderer, "assets/arial.ttf", 24)
 
-    one: Game_Level
-    two: Game_Level
-    three: Game_Level
-    four: Game_Level
+    one, two, three, four: Game_Level
     game_level_load(&one, "assets/one.lvl", u32(game.width), u32(game.height) / 2)
     game_level_load(&two, "assets/two.lvl", u32(game.width), u32(game.height) / 2)
     game_level_load(&three, "assets/three.lvl", u32(game.width), u32(game.height) / 2)
@@ -421,15 +435,13 @@ init :: proc() {
     game.level = 0
 
     player_pos := Vec2{ (f32(game.width) / 2) - (PLAYER_SIZE.x / 2), f32(game.height) - PLAYER_SIZE.y}
-    player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
+    game.player = game_object_make(player_pos, PLAYER_SIZE, resman_get_texture("paddle"))
     ball_pos := player_pos + Vec2{f32(PLAYER_SIZE.x) / 2 - BALL_RADIUS, -BALL_RADIUS * 2}
-    ball = ball_object_make(ball_pos, BALL_RADIUS, INITIAL_BALL_VELOCITY, resman_get_texture("face"))
+    game.ball = ball_object_make(ball_pos, BALL_RADIUS, BALL_INITIAL_VELOCITY, resman_get_texture("face"))
     // ball = ball_object_make(ball_pos, BALL_RADIUS, {0, -450}, resman_get_texture("face"))
 
     play_sound("music")
 }
-
-audio_engine: ma.engine
 
 ball_object_make :: proc(pos: Vec2, radius: f32 = 12.5, velocity: Vec2, sprite: Texture2D) -> Ball_Object {
     return Ball_Object{
@@ -439,12 +451,9 @@ ball_object_make :: proc(pos: Vec2, radius: f32 = 12.5, velocity: Vec2, sprite: 
     }
 }
 
-sprite_renderer_make :: proc(shader: Shader) -> Sprite_Renderer {
-    renderer := Sprite_Renderer{
-        shader = shader
-    }
-    init_render_data(&renderer)
-    return renderer
+sprite_renderer_init :: proc(renderer: ^Sprite_Renderer, shader: Shader) {
+    renderer.shader = shader
+    init_render_data(renderer)
 }
 
 Texture2D :: struct {
@@ -483,8 +492,6 @@ texture2d_generate :: proc(tex: ^Texture2D, width, height: i32, data: rawptr) {
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, tex.wrap_t)
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, tex.filter_min)
     gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, tex.filter_max)
-
-    // unbind
     gl.BindTexture(gl.TEXTURE_2D, 0)
 }
 
@@ -492,12 +499,10 @@ texture_bind :: proc(tex: Texture2D) {
     gl.BindTexture(gl.TEXTURE_2D, tex.id)
 }
 
-resman_make :: proc() -> Resource_Manager {
-    return {
-        shaders = make(map[string]Shader),
-        textures = make(map[string]Texture2D),
-        sounds = make(map[string]^ma.sound)
-    }
+resman_init :: proc(resman: ^Resource_Manager) {
+    resman.shaders = make(map[string]Shader)
+    resman.textures = make(map[string]Texture2D)
+    resman.sounds = make(map[string]^ma.sound)
 }
 
 resman_load_shader :: proc(v_shader_file: string, f_shader_file: string, g_shader_file: string, name: string) -> Shader {
@@ -594,7 +599,7 @@ load_texture_from_file :: proc(file: string, alpha: bool) -> Texture2D {
 
 // TODO: use global renderer?
 draw_sprite :: proc(tex: Texture2D, position: Vec2, size: Vec2 = {10, 10}, rotate: f32 = 0, color: Vec3 = Vec3{1,1,1}) {
-    shader_use(renderer.shader)
+    shader_use(sprite_renderer.shader)
     // NB: odin stores matrices in column-major order AND uses standard math multiplication. The tutorial uses glm which is also column-major BUT uses row-major multiplication syntax. In odin, the transformations (operations) must be in reverse math order Scale -> Rotate -> Translate.
     model := linalg.matrix4_scale(Vec3{size.x, size.y, 1})
     model = linalg.matrix4_translate(Vec3{-0.5 * size.x, -0.5 * size.y, 0}) * model
@@ -603,13 +608,13 @@ draw_sprite :: proc(tex: Texture2D, position: Vec2, size: Vec2 = {10, 10}, rotat
     model = linalg.matrix4_translate(Vec3{position.x, position.y, 0}) * model
 
 
-    shader_set_mat4(renderer.shader, "model", &model)
-    shader_set_vec3(renderer.shader, "spriteColor", color)
+    shader_set_mat4(sprite_renderer.shader, "model", &model)
+    shader_set_vec3(sprite_renderer.shader, "spriteColor", color)
 
     gl.ActiveTexture(gl.TEXTURE0)
     texture_bind(tex)
 
-    gl.BindVertexArray(renderer.quad_vao)
+    gl.BindVertexArray(sprite_renderer.quad_vao)
     gl.DrawArrays(gl.TRIANGLES, 0, 6)
     gl.BindVertexArray(0)
 }
@@ -642,7 +647,7 @@ init_render_data :: proc(sprite_renderer: ^Sprite_Renderer) {
 }
 
 sprite_renderer_destroy :: proc() {
-    gl.DeleteVertexArrays(1, &renderer.quad_vao)
+    gl.DeleteVertexArrays(1, &sprite_renderer.quad_vao)
 }
 
 game_object_make :: proc(position: Vec2 = {0,0}, size: Vec2 = {1,1}, sprite: Texture2D, color: Vec3 = {1,1,1}, velocity: Vec2 = {0,0}) -> Game_Object {
@@ -795,30 +800,30 @@ read_file_to_string :: proc(path: string) -> string {
 }
 
 ball_move :: proc(dt: f32, window_width: u32) -> Vec2 {
-    if !ball.stuck {
-        ball.position += ball.velocity * dt
-        if ball.position.x < 0 {
-            ball.velocity.x *= -1
-            ball.position.x = 0
-        } else if ball.position.x + ball.size.x >= f32(window_width) {
-            ball.velocity.x *= -1
-            ball.position.x = f32(window_width) - ball.size.x
+    if !game.ball.stuck {
+        game.ball.position += game.ball.velocity * dt
+        if game.ball.position.x < 0 {
+            game.ball.velocity.x *= -1
+            game.ball.position.x = 0
+        } else if game.ball.position.x + game.ball.size.x >= f32(window_width) {
+            game.ball.velocity.x *= -1
+            game.ball.position.x = f32(window_width) - game.ball.size.x
         }
-        if ball.position.y < 0 {
-            ball.velocity.y *= -1
-            ball.position.y = 0
+        if game.ball.position.y < 0 {
+            game.ball.velocity.y *= -1
+            game.ball.position.y = 0
         }
     }
     // ball.position.x = clamp(ball.position.x, 0, f32(game.width) - (player.size.x / 2) - ball.radius)
-    return ball.position
+    return game.ball.position
 }
 
 ball_reset :: proc(position: Vec2, velocity: Vec2) {
-    ball.position = position
-    ball.velocity = velocity
-    ball.stuck = true
-    ball.sticky = false
-    ball.passthrough = false
+    game.ball.position = position
+    game.ball.velocity = velocity
+    game.ball.stuck = true
+    game.ball.sticky = false
+    game.ball.passthrough = false
 }
 
 check_collision :: proc(a: Game_Object, b: Game_Object) -> bool {
@@ -857,37 +862,37 @@ check_ball_box_collision :: proc(ball: Ball_Object, box: Game_Object) -> Collisi
 game_do_collisions :: proc() {
     for &box in game.levels[game.level].bricks {
         if !box.destroyed {
-            collision := check_ball_box_collision(ball, box)
+            collision := check_ball_box_collision(game.ball, box)
             if collision.collided {
                 if !box.is_solid {
                     box.destroyed = true
                     powerups_spawn(box)
                     play_sound("hit-nonsolid")
                 } else {
-                    g_shake_time = 0.1
+                    game.shake_time = 0.1
                     effects.shake = true
                     play_sound("hit-solid")
                 }
-                if !(ball.passthrough && !box.is_solid) {
+                if !(game.ball.passthrough && !box.is_solid) {
                     dir := collision.direction
                     diff_vector := collision.difference_vector
                     // horz coll
                     if dir == .Left || dir == .Right {
-                        ball.velocity.x *= -1
-                        penetration := ball.radius - abs(diff_vector.x)
+                        game.ball.velocity.x *= -1
+                        penetration := game.ball.radius - abs(diff_vector.x)
                         if dir == .Left {
-                            ball.position.x += penetration
+                            game.ball.position.x += penetration
                         } else {
-                            ball.position.x -= penetration
+                            game.ball.position.x -= penetration
                         }
                         // vert coll
                     } else {
-                        ball.velocity.y *= -1
-                        penetration := ball.radius - abs(diff_vector.y)
+                        game.ball.velocity.y *= -1
+                        penetration := game.ball.radius - abs(diff_vector.y)
                         if dir == .Up {
-                            ball.position.y -= penetration
+                            game.ball.position.y -= penetration
                         } else {
-                            ball.position.y += penetration
+                            game.ball.position.y += penetration
                         }
 
                     }
@@ -900,24 +905,24 @@ game_do_collisions :: proc() {
             if p.position.y >= f32(game.height) {
                 p.destroyed = true
             }
-            if check_collision(player, p) {
+            if check_collision(game.player, p) {
                 powerup_activate(&p)
                 p.destroyed = true
                 play_sound("get-powerup")
             }
         }
     }
-    collision := check_ball_box_collision(ball, player)
-    if !ball.stuck && collision.collided {
-        center_board := player.position.x + (player.size.x / 2)
-        distance := ball.position.x + ball.radius - center_board
-        pct := distance / (player.size.x / 2)
+    collision := check_ball_box_collision(game.ball, game.player)
+    if !game.ball.stuck && collision.collided {
+        center_board := game.player.position.x + (game.player.size.x / 2)
+        distance := game.ball.position.x + game.ball.radius - center_board
+        pct := distance / (game.player.size.x / 2)
         strength :f32= 2
-        speed := linalg.length(ball.velocity)
-        ball.velocity.x = INITIAL_BALL_VELOCITY.x * pct * strength
-        ball.velocity.y = -1 * abs(ball.velocity.y)
-        ball.velocity = linalg.normalize0(ball.velocity) * speed
-        ball.stuck = ball.sticky
+        speed := linalg.length(game.ball.velocity)
+        game.ball.velocity.x = BALL_INITIAL_VELOCITY.x * pct * strength
+        game.ball.velocity.y = -1 * abs(game.ball.velocity.y)
+        game.ball.velocity = linalg.normalize0(game.ball.velocity) * speed
+        game.ball.stuck = game.ball.sticky
         play_sound("hit-paddle")
     }
 }
@@ -951,17 +956,17 @@ game_reset_level :: proc() {
 }
 
 game_reset_player :: proc() {
-    player.size = PLAYER_SIZE
-    player.position = Vec2{f32(game.width) / 2 - (player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
-    ball_reset(player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, INITIAL_BALL_VELOCITY)
+    game.player.size = PLAYER_SIZE
+    game.player.position = Vec2{f32(game.width) / 2 - (game.player.size.x / 2), f32(game.height) - PLAYER_SIZE.y}
+    ball_reset(game.player.position + Vec2{PLAYER_SIZE.x / 2 - BALL_RADIUS, -(BALL_RADIUS * 2)}, BALL_INITIAL_VELOCITY)
     effects.chaos = false
     effects.confuse = false
-    ball.passthrough = false
-    ball.sticky = false
-    ball.color = {1,1,1}
+    game.ball.passthrough = false
+    game.ball.sticky = false
+    game.ball.color = {1,1,1}
 }
 
-particle_generator_make :: proc(shader: Shader, texture: Texture2D) -> Particle_Generator {
+particle_generator_init :: proc(pg: ^Particle_Generator, shader: Shader, texture: Texture2D) {
      // set up mesh and attribute properties
     vbo: u32
     vao: u32
@@ -991,7 +996,7 @@ particle_generator_make :: proc(shader: Shader, texture: Texture2D) -> Particle_
     for i in 0..<MAX_PARTICLES {
         sa.push(&particles, particle)
     }
-    return Particle_Generator {
+    pg^ = Particle_Generator {
         particles = particles,
         shader = shader,
         texture = texture,
@@ -1078,7 +1083,7 @@ Post_Processor :: struct {
     msfbo, fbo, rbo, vao: u32,
 }
 
-post_processor_make :: proc(shader: Shader, width: u32, height: u32) -> Post_Processor {
+post_processor_init :: proc(effects: ^Post_Processor, shader: Shader, width: u32, height: u32) {
     // init renderbuffer & framebuffer objects
     msfbo, fbo, rbo: u32
     gl.GenFramebuffers(1, &msfbo)
@@ -1134,7 +1139,7 @@ post_processor_make :: proc(shader: Shader, width: u32, height: u32) -> Post_Pro
     };
     gl.Uniform1fv(gl.GetUniformLocation(shader, "blur_kernel"), 9, &blur_kernel[0]);
 
-    return {
+    effects^ = Post_Processor{
         msfbo = msfbo,
         fbo = fbo,
         rbo = rbo,
@@ -1172,6 +1177,7 @@ post_processor_init_render_data :: proc() -> u32 {
 }
 
 effects_begin_render :: proc(pp: Post_Processor) {
+    gl.Viewport(0, 0, i32(pp.width), i32(pp.height))
     gl.BindFramebuffer(gl.FRAMEBUFFER, pp.msfbo)
     gl.ClearColor(0,0,0,1)
     gl.Clear(gl.COLOR_BUFFER_BIT)
@@ -1185,6 +1191,7 @@ effects_end_render :: proc(pp: Post_Processor) {
 }
 
 effects_render :: proc(pp: Post_Processor, time: f32) {
+    gl.Viewport(game.viewport_x, game.viewport_y, game.viewport_width, game.viewport_height)
     shader_use(pp.shader)
     shader_set_float(pp.shader, "time", time)
     shader_set_bool(pp.shader, "confuse", pp.confuse)
@@ -1276,19 +1283,17 @@ powerups_spawn :: proc(block: Game_Object) {
 
 powerup_activate :: proc(p: ^Powerup_Object) {
     p.activated = true
-    // apply effect
-    // set timer, ensure is ticked
     switch p.type {
     case .Speed:
-        ball.velocity *= 1.2
+        game.ball.velocity *= 1.2
     case .Sticky:
-        ball.sticky = true
-        player.color = {1,0.5,1}
+        game.ball.sticky = true
+        game.player.color = {1,0.5,1}
     case .Passthrough:
-        ball.passthrough = true
-        ball.color = {1,0.5,0.5}
+        game.ball.passthrough = true
+        game.ball.color = {1,0.5,0.5}
     case .Padsize_Increase:
-        player.size.x += 50
+        game.player.size.x += 50
     case .Confuse:
         if !effects.chaos {
             effects.confuse = true
@@ -1312,13 +1317,13 @@ powerups_update :: proc(dt: f32) {
 
                 if p.type == .Sticky {
                     if !is_other_powerup_active(.Sticky) {
-                        ball.sticky = false
-                        player.color = {1,1,1}
+                        game.ball.sticky = false
+                        game.player.color = {1,1,1}
                     }
                 } else if p.type == .Passthrough {
                     if !is_other_powerup_active(.Passthrough) {
-                        ball.passthrough = false
-                        ball.color = {1,1,1}
+                        game.ball.passthrough = false
+                        game.ball.color = {1,1,1}
                     }
                 } else if p.type == .Confuse {
                     if !is_other_powerup_active(.Confuse) {
@@ -1368,11 +1373,10 @@ Text_Renderer :: struct {
     // font_scale: f32,
 }
 
-text_renderer_make :: proc(renderer: ^Text_Renderer, width, height: u32) {
+text_renderer_init :: proc(renderer: ^Text_Renderer, width, height: u32) {
     text_shader := resman_load_shader("shaders/text_v.glsl", "shaders/text_f.glsl", "", "text")
     // WARN: unsure znear/far vals
-    text_projection := linalg.matrix_ortho3d_f32(0, f32(WINDOW_W), f32(WINDOW_H), 0, -1, 1)
-    // projection := linalg.matrix_ortho3d_f32(0, f32(width), f32(height), 0, 0, 0)
+    text_projection := linalg.matrix_ortho3d_f32(0, f32(width), f32(height), 0, -1, 1)
     shader_use(text_shader)
     shader_set_mat4(text_shader, "projection", &text_projection)
     shader_set_int(text_shader, "text", 0)
@@ -1602,4 +1606,43 @@ game_is_completed :: proc(level: Game_Level) -> bool {
         }
     }
     return true
+}
+
+update_viewport_and_projection :: proc(screen_width: u32, screen_height: u32) {
+    game.screen_width = screen_width
+    game.screen_height = screen_height
+
+    target_aspect := f32(LOGICAL_W) / f32(LOGICAL_H)
+    screen_aspect := f32(screen_width) / f32(screen_height)
+
+    if screen_aspect > target_aspect {
+        // Screen is wider than target - letterbox on sides
+        game.viewport_height = i32(screen_height)
+        game.viewport_width = i32(f32(screen_height) * target_aspect)
+        game.viewport_x = (i32(screen_width) - game.viewport_width) / 2
+        game.viewport_y = 0
+    } else {
+        // Screen is taller than target - letterbox on top/bottom
+        game.viewport_width = i32(screen_width)
+        game.viewport_height = i32(f32(screen_width) / target_aspect)
+        game.viewport_x = 0
+        game.viewport_y = (i32(screen_height) - game.viewport_height) / 2
+    }
+
+    projection := linalg.matrix_ortho3d_f32(0, f32(game.width), f32(game.height), 0, -1, 1)
+
+    sprite_shader := resman_get_shader("sprite")
+    shader_use(sprite_shader)
+    shader_set_mat4(sprite_shader, "projection", &projection)
+
+    particle_shader := resman_get_shader("particle")
+    shader_use(particle_shader)
+    shader_set_mat4(particle_shader, "projection", &projection)
+
+    text_shader := resman_get_shader("text")
+    shader_use(text_shader)
+    shader_set_mat4(text_shader, "projection", &projection)
+
+    // Set OpenGL viewport with letterboxing
+    gl.Viewport(game.viewport_x, game.viewport_y, game.viewport_width, game.viewport_height)
 }

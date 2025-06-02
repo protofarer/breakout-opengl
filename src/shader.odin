@@ -106,7 +106,7 @@ shader_set_float :: proc(program: u32, name: string, value: f32) {
     delete(cstring)
 }
 
-shader_set_mat4 :: proc(program: u32, name: string, value: ^Mat4) {
+shader_set_mat4 :: proc(program: u32, name: string, value: ^matrix[4,4]f32) {
     cstring := strings.clone_to_cstring(name)
 	gl.UniformMatrix4fv(gl.GetUniformLocation(program, cstring), 1, false, &value[0,0])
     delete(cstring)
